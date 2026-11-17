@@ -37,6 +37,24 @@ class AccountOut(AccountIn):
     is_active: bool
     model_config = ConfigDict(from_attributes=True)
 
+class TransferIn(BaseModel):
+    from_account_id: str
+    to_account_id: str
+    amount: Decimal = Field(gt=0, max_digits=14, decimal_places=2)
+    description: str = Field(min_length=2, max_length=240, default="Account Transfer")
+    transaction_date: datetime
+    member_id: str | None = None
+
+class TransferOut(BaseModel):
+    message: str
+    amount: Decimal
+    from_account_id: str
+    from_account_name: str
+    from_account_balance: Decimal
+    to_account_id: str
+    to_account_name: str
+    to_account_balance: Decimal
+
 class CategoryIn(BaseModel):
     name: str = Field(min_length=2, max_length=80)
     transaction_type: TransactionType
@@ -70,6 +88,10 @@ class TransactionOut(TransactionIn):
     member_name: str | None = None
     account_name: str | None = None
     category_name: str | None = None
+    transfer_account_id: str | None = None
+    transfer_account_name: str | None = None
+    direction: str | None = None
+    loan_id: str | None = None
     model_config = ConfigDict(from_attributes=True)
 
 class CategoryBreakdown(BaseModel):
@@ -124,15 +146,58 @@ class LoanIn(BaseModel):
     person_name: str = Field(min_length=2, max_length=120)
     loan_type: str = Field(pattern="^(lent|borrowed)$")
     principal_amount: Decimal = Field(gt=0, max_digits=14, decimal_places=2)
+    account_id: str
+    member_id: str | None = None
     due_date: datetime | None = None
     description: str | None = None
 
 class LoanRepaymentIn(BaseModel):
     amount: Decimal = Field(gt=0, max_digits=14, decimal_places=2)
+    account_id: str
+    member_id: str | None = None
+    notes: str | None = None
 
-class LoanOut(LoanIn):
+class LoanOut(BaseModel):
     id: str
+    person_name: str
+    loan_type: str
+    principal_amount: Decimal
     repaid_amount: Decimal
     remaining_amount: Decimal
+    account_id: str | None = None
+    account_name: str | None = None
+    member_id: str | None = None
+    member_name: str | None = None
+    due_date: datetime | None = None
+    description: str | None = None
     is_settled: bool
     model_config = ConfigDict(from_attributes=True)
+
+# -------------------------------------------------------------
+# Ledger / Bank Statement Schemas
+# -------------------------------------------------------------
+class StatementEntryOut(BaseModel):
+    id: str
+    transaction_date: datetime
+    description: str
+    entry_type: str # "credit" or "debit"
+    amount: Decimal
+    debit_amount: Decimal
+    credit_amount: Decimal
+    running_balance: Decimal
+    category_name: str | None = None
+    member_name: str | None = None
+    transfer_account_name: str | None = None
+
+class AccountStatementOut(BaseModel):
+    account_id: str
+    account_name: str
+    account_type: str
+    from_date: str
+    to_date: str
+    opening_balance: Decimal
+    total_credits: Decimal
+    total_debits: Decimal
+    closing_balance: Decimal
+    transaction_count: int
+    entries: list[StatementEntryOut]

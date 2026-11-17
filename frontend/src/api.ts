@@ -53,6 +53,10 @@ export interface Transaction {
   member_name?: string | null;
   category_id?: string | null;
   category_name?: string | null;
+  transfer_account_id?: string | null;
+  transfer_account_name?: string | null;
+  direction?: 'in' | 'out' | null;
+  loan_id?: string | null;
   transaction_type: 'income' | 'expense' | 'transfer';
   amount: string | number;
   description: string;
@@ -122,9 +126,50 @@ export interface Loan {
   principal_amount: string | number;
   repaid_amount: string | number;
   remaining_amount: string | number;
+  account_id?: string | null;
+  account_name?: string | null;
+  member_id?: string | null;
+  member_name?: string | null;
   due_date?: string | null;
   description?: string | null;
   is_settled: boolean;
+}
+
+export interface StatementEntry {
+  id: string;
+  transaction_date: string;
+  description: string;
+  entry_type: 'credit' | 'debit';
+  amount: string | number;
+  debit_amount: string | number;
+  credit_amount: string | number;
+  running_balance: string | number;
+  category_name?: string | null;
+  member_name?: string | null;
+  transfer_account_name?: string | null;
+}
+
+export interface AccountStatement {
+  account_id: string;
+  account_name: string;
+  account_type: string;
+  from_date: string;
+  to_date: string;
+  opening_balance: string | number;
+  total_credits: string | number;
+  total_debits: string | number;
+  closing_balance: string | number;
+  transaction_count: number;
+  entries: StatementEntry[];
+}
+
+export interface TransferPayload {
+  from_account_id: string;
+  to_account_id: string;
+  amount: string | number;
+  description: string;
+  transaction_date: string;
+  member_id?: string | null;
 }
 
 export const api = {
@@ -148,10 +193,19 @@ export const api = {
     request<Member>(`/members/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
   deleteMember: (id: string) => request<void>(`/members/${id}`, { method: 'DELETE' }),
 
-  // Accounts
+  // Accounts & Transfers
   accounts: () => request<Account[]>('/accounts'),
   addAccount: (payload: { name: string; account_type: string; opening_balance: string | number }) =>
     request<Account>('/accounts', { method: 'POST', body: JSON.stringify(payload) }),
+  transferFunds: (payload: TransferPayload) =>
+    request<{ message: string; from_account_balance: string | number; to_account_balance: string | number }>('/accounts/transfer', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  getAccountStatement: (accountId: string, fromDate: string, toDate: string) =>
+    request<AccountStatement>(`/accounts/${accountId}/statement?from_date=${fromDate}&to_date=${toDate}`),
+  exportStatementCsvUrl: (accountId: string, fromDate: string, toDate: string) =>
+    `${API_BASE}/accounts/${accountId}/statement/export/csv?from_date=${fromDate}&to_date=${toDate}`,
 
   // Transactions
   transactions: (params: { type?: string; member_id?: string; category_id?: string; account_id?: string; month?: string; search?: string } = {}) => {
@@ -191,9 +245,16 @@ export const api = {
 
   // Loans
   loans: () => request<Loan[]>('/loans'),
-  addLoan: (payload: { person_name: string; loan_type: 'lent' | 'borrowed'; principal_amount: string | number; description?: string; due_date?: string }) =>
-    request<Loan>('/loans', { method: 'POST', body: JSON.stringify(payload) }),
-  recordLoanRepayment: (id: string, amount: string | number) =>
-    request<Loan>(`/loans/${id}/repayment`, { method: 'POST', body: JSON.stringify({ amount }) }),
+  addLoan: (payload: {
+    person_name: string;
+    loan_type: 'lent' | 'borrowed';
+    principal_amount: string | number;
+    account_id: string;
+    member_id?: string | null;
+    description?: string;
+    due_date?: string;
+  }) => request<Loan>('/loans', { method: 'POST', body: JSON.stringify(payload) }),
+  recordLoanRepayment: (id: string, payload: { amount: string | number; account_id: string; member_id?: string | null; notes?: string }) =>
+    request<Loan>(`/loans/${id}/repayment`, { method: 'POST', body: JSON.stringify(payload) }),
   deleteLoan: (id: string) => request<void>(`/loans/${id}`, { method: 'DELETE' }),
 };

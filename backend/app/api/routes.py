@@ -1,6 +1,6 @@
 import csv
 import io
-from datetime import datetime, timezone
+from datetime import datetime, timezone, time
 from decimal import Decimal
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy import func, or_
@@ -13,12 +13,14 @@ from app.models.entities import (
 )
 from app.schemas.api import (
     RegisterIn, LoginIn, TokenOut, MemberIn, MemberOut,
-    AccountIn, AccountOut, CategoryIn, CategoryOut,
+    AccountIn, AccountOut, TransferIn, TransferOut,
+    CategoryIn, CategoryOut,
     TransactionIn, TransactionUpdateIn, TransactionOut,
     DashboardOut, CategoryBreakdown, MonthlyTrend,
     BudgetIn, BudgetOut,
     SavingsGoalIn, SavingsGoalOut, SavingsGoalContributeIn,
-    LoanIn, LoanOut, LoanRepaymentIn
+    LoanIn, LoanOut, LoanRepaymentIn,
+    AccountStatementOut, StatementEntryOut
 )
 from app.api.deps import current_user, current_household
 
@@ -35,11 +37,13 @@ DEFAULT_CATEGORIES = [
     ("Shopping & Clothing", TransactionType.expense),
     ("Entertainment & Dining", TransactionType.expense),
     ("Household & Maintenance", TransactionType.expense),
+    ("Loans & Lending", TransactionType.expense),
     ("Miscellaneous", TransactionType.expense),
     # Income
     ("Salary & Wages", TransactionType.income),
     ("Business & Freelancing", TransactionType.income),
     ("Investments & Dividends", TransactionType.income),
+    ("Loan Repayments Received", TransactionType.income),
     ("Gifts & Grants", TransactionType.income),
     ("Rental Income", TransactionType.income),
     ("Other Income", TransactionType.income),
@@ -52,6 +56,40 @@ def ensure_default_categories(household_id: str, db: Session):
         if name not in existing_names:
             db.add(Category(household_id=household_id, name=name, transaction_type=tx_type))
     db.commit()
+
+
+# ==========================================
+# BALANCE CALCULATION HELPER
+# ==========================================
+
+def compute_account_balance(account: Account, household_id: str, db: Session, up_to_datetime: datetime | None = None) -> Decimal:
+    """
+    Computes exact real-time available balance for an account:
+    Opening Balance + Incomes - Expenses + Transfers In - Transfers Out
+    """
+    bal = Decimal(str(account.opening_balance))
+
+    q = db.query(Transaction).filter(
+        Transaction.household_id == household_id,
+        Transaction.account_id == account.id,
+        Transaction.deleted_at.is_(None)
+    )
+    if up_to_datetime:
+        q = q.filter(Transaction.transaction_date <= up_to_datetime)
+
+    txs = q.all()
+    for tx in txs:
+        amt = Decimal(str(tx.amount))
+        if tx.transaction_type == TransactionType.income:
+            bal += amt
+        elif tx.transaction_type == TransactionType.expense:
+            bal -= amt
+        elif tx.transaction_type == TransactionType.transfer:
+            if tx.direction == "in":
+                bal += amt
+            elif tx.direction == "out":
+                bal -= amt
+    return bal
 
 
 # ==========================================
@@ -72,8 +110,8 @@ def register(payload: RegisterIn, db: Session = Depends(get_db)):
     db.flush()
 
     # Default Cash and Bank accounts
-    db.add(Account(household_id=household.id, name="Cash", account_type="cash", opening_balance=Decimal("0.00")))
-    db.add(Account(household_id=household.id, name="Bank Account", account_type="bank", opening_balance=Decimal("0.00")))
+    db.add(Account(household_id=household.id, name="Cash in Hand", account_type="cash", opening_balance=Decimal("0.00")))
+    db.add(Account(household_id=household.id, name="Primary Bank Account", account_type="bank", opening_balance=Decimal("0.00")))
 
     # Default self family member
     db.add(FamilyMember(household_id=household.id, name=payload.full_name, relationship_label="Self"))
@@ -164,7 +202,7 @@ def deactivate_member(member_id: str, h: Household = Depends(current_household),
 
 
 # ==========================================
-# ACCOUNTS (WITH REAL-TIME BALANCES)
+# ACCOUNTS & FUND TRANSFERS
 # ==========================================
 
 @router.get("/accounts", response_model=list[AccountOut])
@@ -172,23 +210,7 @@ def list_accounts(h: Household = Depends(current_household), db: Session = Depen
     accounts = db.query(Account).filter(Account.household_id == h.id, Account.is_active.is_(True)).all()
     results = []
     for acc in accounts:
-        # Sum income
-        income = db.query(func.coalesce(func.sum(Transaction.amount), 0)).filter(
-            Transaction.household_id == h.id,
-            Transaction.account_id == acc.id,
-            Transaction.transaction_type == TransactionType.income,
-            Transaction.deleted_at.is_(None)
-        ).scalar() or Decimal("0.00")
-
-        # Sum expense
-        expense = db.query(func.coalesce(func.sum(Transaction.amount), 0)).filter(
-            Transaction.household_id == h.id,
-            Transaction.account_id == acc.id,
-            Transaction.transaction_type == TransactionType.expense,
-            Transaction.deleted_at.is_(None)
-        ).scalar() or Decimal("0.00")
-
-        balance = acc.opening_balance + Decimal(str(income)) - Decimal(str(expense))
+        balance = compute_account_balance(acc, h.id, db)
         results.append(AccountOut(
             id=acc.id,
             name=acc.name,
@@ -214,6 +236,77 @@ def add_account(payload: AccountIn, h: Household = Depends(current_household), d
         is_active=account.is_active
     )
 
+@router.post("/accounts/transfer", response_model=TransferOut, status_code=201)
+def transfer_funds(
+    payload: TransferIn,
+    user: User = Depends(current_user),
+    h: Household = Depends(current_household),
+    db: Session = Depends(get_db)
+):
+    if payload.from_account_id == payload.to_account_id:
+        raise HTTPException(status_code=422, detail="Source and destination accounts must be different.")
+
+    from_acc = db.query(Account).filter(Account.id == payload.from_account_id, Account.household_id == h.id, Account.is_active.is_(True)).first()
+    if not from_acc:
+        raise HTTPException(status_code=404, detail="Source account not found.")
+
+    to_acc = db.query(Account).filter(Account.id == payload.to_account_id, Account.household_id == h.id, Account.is_active.is_(True)).first()
+    if not to_acc:
+        raise HTTPException(status_code=404, detail="Destination account not found.")
+
+    # 1. REQUIREMENT: Account balance cannot be negative
+    from_balance = compute_account_balance(from_acc, h.id, db)
+    if from_balance < payload.amount:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Insufficient balance in '{from_acc.name}'. Available: ₹{from_balance:,.2f}, required: ₹{payload.amount:,.2f}. Transaction cannot be done."
+        )
+
+    # 2. Record Debit (Transfer Out)
+    tx_out = Transaction(
+        household_id=h.id,
+        account_id=from_acc.id,
+        transfer_account_id=to_acc.id,
+        member_id=payload.member_id,
+        transaction_type=TransactionType.transfer,
+        direction="out",
+        amount=payload.amount,
+        description=f"Transfer to {to_acc.name}: {payload.description}",
+        transaction_date=payload.transaction_date
+    )
+    db.add(tx_out)
+
+    # 3. Record Credit (Transfer In)
+    tx_in = Transaction(
+        household_id=h.id,
+        account_id=to_acc.id,
+        transfer_account_id=from_acc.id,
+        member_id=payload.member_id,
+        transaction_type=TransactionType.transfer,
+        direction="in",
+        amount=payload.amount,
+        description=f"Transfer from {from_acc.name}: {payload.description}",
+        transaction_date=payload.transaction_date
+    )
+    db.add(tx_in)
+
+    db.add(AuditLog(household_id=h.id, actor_user_id=user.id, entity_type="transfer", entity_id=from_acc.id, action="transfer_funds"))
+    db.commit()
+
+    new_from_balance = compute_account_balance(from_acc, h.id, db)
+    new_to_balance = compute_account_balance(to_acc, h.id, db)
+
+    return TransferOut(
+        message=f"Transferred ₹{payload.amount:,.2f} from {from_acc.name} to {to_acc.name}.",
+        amount=payload.amount,
+        from_account_id=from_acc.id,
+        from_account_name=from_acc.name,
+        from_account_balance=new_from_balance,
+        to_account_id=to_acc.id,
+        to_account_name=to_acc.name,
+        to_account_balance=new_to_balance
+    )
+
 
 # ==========================================
 # TRANSACTIONS
@@ -228,6 +321,10 @@ def format_tx_out(tx: Transaction) -> TransactionOut:
         member_name=tx.member.name if tx.member else None,
         category_id=tx.category_id,
         category_name=tx.category.name if tx.category else None,
+        transfer_account_id=tx.transfer_account_id,
+        transfer_account_name=tx.transfer_account.name if tx.transfer_account else None,
+        direction=tx.direction,
+        loan_id=tx.loan_id,
         transaction_type=tx.transaction_type,
         amount=tx.amount,
         description=tx.description,
@@ -241,7 +338,7 @@ def list_transactions(
     member_id: str | None = None,
     account_id: str | None = None,
     category_id: str | None = None,
-    month: str | None = None, # "YYYY-MM"
+    month: str | None = None,
     search: str | None = None,
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
@@ -275,6 +372,265 @@ def list_transactions(
 
     items = q.order_by(Transaction.transaction_date.desc()).offset(offset).limit(limit).all()
     return [format_tx_out(tx) for tx in items]
+
+@router.post("/transactions", response_model=TransactionOut, status_code=201)
+def add_transaction(
+    payload: TransactionIn,
+    user: User = Depends(current_user),
+    h: Household = Depends(current_household),
+    db: Session = Depends(get_db)
+):
+    account = db.query(Account).filter(Account.id == payload.account_id, Account.household_id == h.id, Account.is_active.is_(True)).first()
+    if not account:
+        raise HTTPException(status_code=422, detail="Select a valid household account")
+    if payload.member_id:
+        member = db.query(FamilyMember).filter(FamilyMember.id == payload.member_id, FamilyMember.household_id == h.id, FamilyMember.is_active.is_(True)).first()
+        if not member:
+            raise HTTPException(status_code=422, detail="Select an active family member")
+    if payload.category_id:
+        category = db.query(Category).filter(Category.id == payload.category_id, Category.household_id == h.id).first()
+        if not category:
+            raise HTTPException(status_code=422, detail="Select a valid category")
+    if payload.client_request_id:
+        existing = db.query(Transaction).filter(Transaction.household_id == h.id, Transaction.client_request_id == payload.client_request_id).first()
+        if existing:
+            return format_tx_out(existing)
+
+    # REQUIREMENT: Account balance cannot be negative
+    if payload.transaction_type == TransactionType.expense:
+        current_bal = compute_account_balance(account, h.id, db)
+        if current_bal < payload.amount:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Account balance cannot be negative. Account '{account.name}' has balance ₹{current_bal:,.2f}, cannot debit ₹{payload.amount:,.2f}."
+            )
+
+    direction = "out" if payload.transaction_type == TransactionType.expense else "in"
+    tx = Transaction(
+        household_id=h.id,
+        direction=direction,
+        **payload.model_dump()
+    )
+    db.add(tx)
+    db.flush()
+    db.add(AuditLog(household_id=h.id, actor_user_id=user.id, entity_type="transaction", entity_id=tx.id, action="create"))
+    db.commit()
+    db.refresh(tx)
+    return format_tx_out(tx)
+
+@router.patch("/transactions/{transaction_id}", response_model=TransactionOut)
+def update_transaction(
+    transaction_id: str,
+    payload: TransactionUpdateIn,
+    user: User = Depends(current_user),
+    h: Household = Depends(current_household),
+    db: Session = Depends(get_db)
+):
+    tx = db.query(Transaction).filter(Transaction.id == transaction_id, Transaction.household_id == h.id, Transaction.deleted_at.is_(None)).first()
+    if not tx:
+        raise HTTPException(status_code=404, detail="Transaction not found")
+
+    target_acc_id = payload.account_id or tx.account_id
+    target_acc = db.query(Account).filter(Account.id == target_acc_id, Account.household_id == h.id).first()
+    if not target_acc:
+        raise HTTPException(status_code=422, detail="Invalid account")
+
+    target_type = payload.transaction_type or tx.transaction_type
+    target_amount = payload.amount if payload.amount is not None else tx.amount
+
+    # Balance check if expense
+    if target_type == TransactionType.expense:
+        # compute balance excluding current tx
+        current_bal = compute_account_balance(target_acc, h.id, db)
+        if tx.account_id == target_acc_id and tx.transaction_type == TransactionType.expense:
+            available_bal = current_bal + Decimal(str(tx.amount))
+        else:
+            available_bal = current_bal
+
+        if available_bal < target_amount:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Account balance cannot be negative. Account '{target_acc.name}' has available balance ₹{available_bal:,.2f}, cannot debit ₹{target_amount:,.2f}."
+            )
+
+    data = payload.model_dump(exclude_unset=True)
+    for k, v in data.items():
+        setattr(tx, k, v)
+
+    if tx.transaction_type == TransactionType.expense:
+        tx.direction = "out"
+    elif tx.transaction_type == TransactionType.income:
+        tx.direction = "in"
+
+    db.add(AuditLog(household_id=h.id, actor_user_id=user.id, entity_type="transaction", entity_id=tx.id, action="update"))
+    db.commit()
+    db.refresh(tx)
+    return format_tx_out(tx)
+
+@router.delete("/transactions/{transaction_id}", status_code=204)
+def delete_transaction(
+    transaction_id: str,
+    user: User = Depends(current_user),
+    h: Household = Depends(current_household),
+    db: Session = Depends(get_db)
+):
+    tx = db.query(Transaction).filter(Transaction.id == transaction_id, Transaction.household_id == h.id, Transaction.deleted_at.is_(None)).first()
+    if not tx:
+        raise HTTPException(status_code=404, detail="Transaction not found")
+    tx.deleted_at = datetime.now(timezone.utc)
+    db.add(AuditLog(household_id=h.id, actor_user_id=user.id, entity_type="transaction", entity_id=tx.id, action="soft_delete"))
+    db.commit()
+
+
+# ==========================================
+# LEDGER / BANK STATEMENT (WITH RUNNING BALANCES)
+# ==========================================
+
+@router.get("/accounts/{account_id}/statement", response_model=AccountStatementOut)
+def get_account_statement(
+    account_id: str,
+    from_date: str = Query(..., description="From date YYYY-MM-DD"),
+    to_date: str = Query(..., description="To date YYYY-MM-DD"),
+    h: Household = Depends(current_household),
+    db: Session = Depends(get_db)
+):
+    account = db.query(Account).filter(Account.id == account_id, Account.household_id == h.id).first()
+    if not account:
+        raise HTTPException(status_code=404, detail="Account not found")
+
+    try:
+        from_dt = datetime.strptime(from_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        to_dt = datetime.strptime(to_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59, tzinfo=timezone.utc)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Invalid date format. Use YYYY-MM-DD.")
+
+    if from_dt > to_dt:
+        raise HTTPException(status_code=422, detail="'from_date' cannot be after 'to_date'.")
+
+    # 1. Opening balance as of from_dt:
+    opening_bal = Decimal(str(account.opening_balance))
+    prior_txs = db.query(Transaction).filter(
+        Transaction.household_id == h.id,
+        Transaction.account_id == account.id,
+        Transaction.deleted_at.is_(None),
+        Transaction.transaction_date < from_dt
+    ).all()
+
+    for tx in prior_txs:
+        amt = Decimal(str(tx.amount))
+        if tx.transaction_type == TransactionType.income:
+            opening_bal += amt
+        elif tx.transaction_type == TransactionType.expense:
+            opening_bal -= amt
+        elif tx.transaction_type == TransactionType.transfer:
+            if tx.direction == "in":
+                opening_bal += amt
+            elif tx.direction == "out":
+                opening_bal -= amt
+
+    # 2. Transactions during period in chronological order
+    period_txs = db.query(Transaction).filter(
+        Transaction.household_id == h.id,
+        Transaction.account_id == account.id,
+        Transaction.deleted_at.is_(None),
+        Transaction.transaction_date >= from_dt,
+        Transaction.transaction_date <= to_dt
+    ).order_by(Transaction.transaction_date.asc(), Transaction.created_at.asc()).all()
+
+    running = opening_bal
+    entries: list[StatementEntryOut] = []
+    total_debits = Decimal("0.00")
+    total_credits = Decimal("0.00")
+
+    for tx in period_txs:
+        amt = Decimal(str(tx.amount))
+        is_credit = False
+
+        if tx.transaction_type == TransactionType.income:
+            is_credit = True
+        elif tx.transaction_type == TransactionType.expense:
+            is_credit = False
+        elif tx.transaction_type == TransactionType.transfer:
+            is_credit = (tx.direction == "in")
+
+        if is_credit:
+            credit_amt = amt
+            debit_amt = Decimal("0.00")
+            running += amt
+            total_credits += amt
+            e_type = "credit"
+        else:
+            debit_amt = amt
+            credit_amt = Decimal("0.00")
+            running -= amt
+            total_debits += amt
+            e_type = "debit"
+
+        entries.append(StatementEntryOut(
+            id=tx.id,
+            transaction_date=tx.transaction_date,
+            description=tx.description,
+            entry_type=e_type,
+            amount=amt,
+            debit_amount=debit_amt,
+            credit_amount=credit_amt,
+            running_balance=running,
+            category_name=tx.category.name if tx.category else None,
+            member_name=tx.member.name if tx.member else None,
+            transfer_account_name=tx.transfer_account.name if tx.transfer_account else None
+        ))
+
+    return AccountStatementOut(
+        account_id=account.id,
+        account_name=account.name,
+        account_type=account.account_type,
+        from_date=from_date,
+        to_date=to_date,
+        opening_balance=opening_bal,
+        total_credits=total_credits,
+        total_debits=total_debits,
+        closing_balance=running,
+        transaction_count=len(entries),
+        entries=entries
+    )
+
+@router.get("/accounts/{account_id}/statement/export/csv")
+def export_statement_csv(
+    account_id: str,
+    from_date: str = Query(..., description="From date YYYY-MM-DD"),
+    to_date: str = Query(..., description="To date YYYY-MM-DD"),
+    h: Household = Depends(current_household),
+    db: Session = Depends(get_db)
+):
+    stmt = get_account_statement(account_id=account_id, from_date=from_date, to_date=to_date, h=h, db=db)
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([f"ACCOUNT STATEMENT: {stmt.account_name} ({stmt.account_type.upper()})"])
+    writer.writerow([f"Period: {stmt.from_date} to {stmt.to_date}"])
+    writer.writerow([f"Opening Balance: INR {stmt.opening_balance:,.2f}"])
+    writer.writerow([f"Total Credits: INR {stmt.total_credits:,.2f} | Total Debits: INR {stmt.total_debits:,.2f}"])
+    writer.writerow([f"Closing Balance: INR {stmt.closing_balance:,.2f}"])
+    writer.writerow([])
+    writer.writerow(["Date", "Description", "Category", "Member", "Debit (INR)", "Credit (INR)", "Available Balance (INR)"])
+
+    for e in stmt.entries:
+        writer.writerow([
+            e.transaction_date.strftime("%Y-%m-%d %H:%M"),
+            e.description,
+            e.category_name or "-",
+            e.member_name or "Household",
+            str(e.debit_amount) if e.debit_amount > 0 else "",
+            str(e.credit_amount) if e.credit_amount > 0 else "",
+            str(e.running_balance)
+        ])
+
+    filename = f"statement_{stmt.account_name.replace(' ', '_')}_{from_date}_to_{to_date}.csv"
+    return Response(
+        content=output.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+    )
 
 @router.get("/transactions/export/csv")
 def export_transactions_csv(
@@ -320,82 +676,6 @@ def export_transactions_csv(
         headers={"Content-Disposition": f'attachment; filename="{filename}"'}
     )
 
-@router.post("/transactions", response_model=TransactionOut, status_code=201)
-def add_transaction(
-    payload: TransactionIn,
-    user: User = Depends(current_user),
-    h: Household = Depends(current_household),
-    db: Session = Depends(get_db)
-):
-    account = db.query(Account).filter(Account.id == payload.account_id, Account.household_id == h.id, Account.is_active.is_(True)).first()
-    if not account:
-        raise HTTPException(status_code=422, detail="Select a valid household account")
-    if payload.member_id:
-        member = db.query(FamilyMember).filter(FamilyMember.id == payload.member_id, FamilyMember.household_id == h.id, FamilyMember.is_active.is_(True)).first()
-        if not member:
-            raise HTTPException(status_code=422, detail="Select an active family member")
-    if payload.category_id:
-        category = db.query(Category).filter(Category.id == payload.category_id, Category.household_id == h.id).first()
-        if not category:
-            raise HTTPException(status_code=422, detail="Select a valid category")
-    if payload.client_request_id:
-        existing = db.query(Transaction).filter(Transaction.household_id == h.id, Transaction.client_request_id == payload.client_request_id).first()
-        if existing:
-            return format_tx_out(existing)
-
-    tx = Transaction(household_id=h.id, **payload.model_dump())
-    db.add(tx)
-    db.flush()
-    db.add(AuditLog(household_id=h.id, actor_user_id=user.id, entity_type="transaction", entity_id=tx.id, action="create"))
-    db.commit()
-    db.refresh(tx)
-    return format_tx_out(tx)
-
-@router.patch("/transactions/{transaction_id}", response_model=TransactionOut)
-def update_transaction(
-    transaction_id: str,
-    payload: TransactionUpdateIn,
-    user: User = Depends(current_user),
-    h: Household = Depends(current_household),
-    db: Session = Depends(get_db)
-):
-    tx = db.query(Transaction).filter(Transaction.id == transaction_id, Transaction.household_id == h.id, Transaction.deleted_at.is_(None)).first()
-    if not tx:
-        raise HTTPException(status_code=404, detail="Transaction not found")
-
-    data = payload.model_dump(exclude_unset=True)
-    if "account_id" in data and data["account_id"]:
-        acc = db.query(Account).filter(Account.id == data["account_id"], Account.household_id == h.id).first()
-        if not acc: raise HTTPException(status_code=422, detail="Invalid account")
-    if "member_id" in data and data["member_id"]:
-        m = db.query(FamilyMember).filter(FamilyMember.id == data["member_id"], FamilyMember.household_id == h.id).first()
-        if not m: raise HTTPException(status_code=422, detail="Invalid member")
-    if "category_id" in data and data["category_id"]:
-        cat = db.query(Category).filter(Category.id == data["category_id"], Category.household_id == h.id).first()
-        if not cat: raise HTTPException(status_code=422, detail="Invalid category")
-
-    for k, v in data.items():
-        setattr(tx, k, v)
-
-    db.add(AuditLog(household_id=h.id, actor_user_id=user.id, entity_type="transaction", entity_id=tx.id, action="update"))
-    db.commit()
-    db.refresh(tx)
-    return format_tx_out(tx)
-
-@router.delete("/transactions/{transaction_id}", status_code=204)
-def delete_transaction(
-    transaction_id: str,
-    user: User = Depends(current_user),
-    h: Household = Depends(current_household),
-    db: Session = Depends(get_db)
-):
-    tx = db.query(Transaction).filter(Transaction.id == transaction_id, Transaction.household_id == h.id, Transaction.deleted_at.is_(None)).first()
-    if not tx:
-        raise HTTPException(status_code=404, detail="Transaction not found")
-    tx.deleted_at = datetime.now(timezone.utc)
-    db.add(AuditLog(household_id=h.id, actor_user_id=user.id, entity_type="transaction", entity_id=tx.id, action="soft_delete"))
-    db.commit()
-
 
 # ==========================================
 # DASHBOARD & ANALYTICS
@@ -403,7 +683,7 @@ def delete_transaction(
 
 @router.get("/dashboard/summary", response_model=DashboardOut)
 def dashboard_summary(
-    month: str | None = None, # "YYYY-MM"
+    month: str | None = None,
     h: Household = Depends(current_household),
     db: Session = Depends(get_db)
 ):
@@ -421,7 +701,7 @@ def dashboard_summary(
     else:
         month_filter = (func.date_trunc("month", Transaction.transaction_date) == func.date_trunc("month", func.now()),)
 
-    # 1. Monthly Income & Expenses Totals
+    # Incomes & Expenses (Transfers excluded from totals!)
     rows = db.query(
         Transaction.transaction_type,
         func.coalesce(func.sum(Transaction.amount), 0),
@@ -430,9 +710,9 @@ def dashboard_summary(
 
     income = sum((Decimal(str(total)) for typ, total, _ in rows if typ == TransactionType.income), Decimal("0"))
     expenses = sum((Decimal(str(total)) for typ, total, _ in rows if typ == TransactionType.expense), Decimal("0"))
-    count = sum(n for _, _, n in rows)
+    count = sum(n for typ, _, n in rows if typ in (TransactionType.income, TransactionType.expense))
 
-    # 2. Category Breakdown for Expenses
+    # Category Breakdown for Expenses
     cat_rows = db.query(
         Category.name,
         func.coalesce(func.sum(Transaction.amount), 0)
@@ -453,7 +733,7 @@ def dashboard_summary(
             percentage=round(pct, 1)
         ))
 
-    # 3. Monthly Trend (Last 6 Months)
+    # Monthly Trend (Last 6 Months)
     trend_rows = db.query(
         func.to_char(Transaction.transaction_date, 'YYYY-MM').label("m"),
         Transaction.transaction_type,
@@ -497,7 +777,6 @@ def list_budgets(h: Household = Depends(current_household), db: Session = Depend
     budgets = db.query(Budget).filter(Budget.household_id == h.id, Budget.is_active.is_(True)).all()
     results = []
     for b in budgets:
-        # Calculate current month spending for this budget
         q = db.query(func.coalesce(func.sum(Transaction.amount), 0)).filter(
             Transaction.household_id == h.id,
             Transaction.transaction_type == TransactionType.expense,
@@ -584,7 +863,7 @@ def delete_savings_goal(goal_id: str, h: Household = Depends(current_household),
 
 
 # ==========================================
-# LOANS & BORROWING LEDGER
+# LOANS & BORROWING LEDGER (INTEGRATED WITH ACCOUNTS)
 # ==========================================
 
 @router.get("/loans", response_model=list[LoanOut])
@@ -600,6 +879,10 @@ def list_loans(h: Household = Depends(current_household), db: Session = Depends(
             principal_amount=ln.principal_amount,
             repaid_amount=ln.repaid_amount,
             remaining_amount=rem,
+            account_id=ln.account_id,
+            account_name=ln.account.name if ln.account else None,
+            member_id=ln.member_id,
+            member_name=ln.member.name if ln.member else None,
             due_date=ln.due_date,
             description=ln.description,
             is_settled=ln.is_settled
@@ -607,11 +890,68 @@ def list_loans(h: Household = Depends(current_household), db: Session = Depends(
     return results
 
 @router.post("/loans", response_model=LoanOut, status_code=201)
-def add_loan(payload: LoanIn, h: Household = Depends(current_household), db: Session = Depends(get_db)):
+def add_loan(
+    payload: LoanIn,
+    user: User = Depends(current_user),
+    h: Household = Depends(current_household),
+    db: Session = Depends(get_db)
+):
+    account = db.query(Account).filter(Account.id == payload.account_id, Account.household_id == h.id, Account.is_active.is_(True)).first()
+    if not account:
+        raise HTTPException(status_code=404, detail="Selected account not found.")
+
+    member = None
+    if payload.member_id:
+        member = db.query(FamilyMember).filter(FamilyMember.id == payload.member_id, FamilyMember.household_id == h.id).first()
+        if not member:
+            raise HTTPException(status_code=404, detail="Selected family member not found.")
+
+    # 1. REQUIREMENT: If lending money out, account balance cannot be negative
+    if payload.loan_type == "lent":
+        current_bal = compute_account_balance(account, h.id, db)
+        if current_bal < payload.principal_amount:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Cannot give loan of ₹{payload.principal_amount:,.2f}. Account '{account.name}' only has available balance ₹{current_bal:,.2f}."
+            )
+
+    # 2. Create Loan
     ln = Loan(household_id=h.id, **payload.model_dump())
     db.add(ln)
+    db.flush()
+
+    # 3. Create linked transaction to debit or credit the account
+    if payload.loan_type == "lent":
+        # Debit Prabodh's account
+        tx = Transaction(
+            household_id=h.id,
+            account_id=account.id,
+            member_id=payload.member_id,
+            loan_id=ln.id,
+            transaction_type=TransactionType.expense,
+            direction="out",
+            amount=payload.principal_amount,
+            description=f"Loan given to {payload.person_name} ({payload.description or 'Personal Loan'})",
+            transaction_date=datetime.now(timezone.utc)
+        )
+    else:
+        # Credit the account with borrowed funds
+        tx = Transaction(
+            household_id=h.id,
+            account_id=account.id,
+            member_id=payload.member_id,
+            loan_id=ln.id,
+            transaction_type=TransactionType.income,
+            direction="in",
+            amount=payload.principal_amount,
+            description=f"Loan received from {payload.person_name} ({payload.description or 'Borrowed'})",
+            transaction_date=datetime.now(timezone.utc)
+        )
+    db.add(tx)
+    db.add(AuditLog(household_id=h.id, actor_user_id=user.id, entity_type="loan", entity_id=ln.id, action="create"))
     db.commit()
     db.refresh(ln)
+
     return LoanOut(
         id=ln.id,
         person_name=ln.person_name,
@@ -619,29 +959,99 @@ def add_loan(payload: LoanIn, h: Household = Depends(current_household), db: Ses
         principal_amount=ln.principal_amount,
         repaid_amount=ln.repaid_amount,
         remaining_amount=ln.principal_amount,
+        account_id=ln.account_id,
+        account_name=account.name,
+        member_id=ln.member_id,
+        member_name=member.name if member else None,
         due_date=ln.due_date,
         description=ln.description,
         is_settled=ln.is_settled
     )
 
 @router.post("/loans/{loan_id}/repayment", response_model=LoanOut)
-def record_loan_repayment(loan_id: str, payload: LoanRepaymentIn, h: Household = Depends(current_household), db: Session = Depends(get_db)):
+def record_loan_repayment(
+    loan_id: str,
+    payload: LoanRepaymentIn,
+    user: User = Depends(current_user),
+    h: Household = Depends(current_household),
+    db: Session = Depends(get_db)
+):
     ln = db.query(Loan).filter(Loan.id == loan_id, Loan.household_id == h.id).first()
     if not ln:
-        raise HTTPException(status_code=404, detail="Loan not found")
+        raise HTTPException(status_code=404, detail="Loan record not found.")
+
+    rem = max(Decimal("0.00"), ln.principal_amount - ln.repaid_amount)
+    if payload.amount > rem:
+        raise HTTPException(status_code=422, detail=f"Repayment amount (₹{payload.amount:,.2f}) exceeds remaining loan balance (₹{rem:,.2f}).")
+
+    target_acc = db.query(Account).filter(Account.id == payload.account_id, Account.household_id == h.id, Account.is_active.is_(True)).first()
+    if not target_acc:
+        raise HTTPException(status_code=404, detail="Target account not found.")
+
+    member = None
+    if payload.member_id:
+        member = db.query(FamilyMember).filter(FamilyMember.id == payload.member_id, FamilyMember.household_id == h.id).first()
+        if not member:
+            raise HTTPException(status_code=404, detail="Target family member not found.")
+
+    # 1. Update loan repayment
     ln.repaid_amount += payload.amount
     if ln.repaid_amount >= ln.principal_amount:
         ln.is_settled = True
+
+    # 2. REQUIREMENT:
+    # "suppose returned then credited to prabodh or family member as per choice"
+    if ln.loan_type == "lent":
+        # Money returned by debtor -> Credit chosen account
+        tx = Transaction(
+            household_id=h.id,
+            account_id=target_acc.id,
+            member_id=payload.member_id,
+            loan_id=ln.id,
+            transaction_type=TransactionType.income,
+            direction="in",
+            amount=payload.amount,
+            description=f"Loan repayment received from {ln.person_name} ({payload.notes or 'Repayment'})",
+            transaction_date=datetime.now(timezone.utc)
+        )
+        db.add(tx)
+    else:
+        # Repaying borrowed money -> Debit chosen account (must have balance!)
+        acc_bal = compute_account_balance(target_acc, h.id, db)
+        if acc_bal < payload.amount:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Account balance cannot be negative. Account '{target_acc.name}' has balance ₹{acc_bal:,.2f}, cannot debit ₹{payload.amount:,.2f} for loan repayment."
+            )
+        tx = Transaction(
+            household_id=h.id,
+            account_id=target_acc.id,
+            member_id=payload.member_id,
+            loan_id=ln.id,
+            transaction_type=TransactionType.expense,
+            direction="out",
+            amount=payload.amount,
+            description=f"Repayment made for loan from {ln.person_name} ({payload.notes or 'Repayment'})",
+            transaction_date=datetime.now(timezone.utc)
+        )
+        db.add(tx)
+
+    db.add(AuditLog(household_id=h.id, actor_user_id=user.id, entity_type="loan", entity_id=ln.id, action="repayment"))
     db.commit()
     db.refresh(ln)
-    rem = max(Decimal("0.00"), ln.principal_amount - ln.repaid_amount)
+
+    new_rem = max(Decimal("0.00"), ln.principal_amount - ln.repaid_amount)
     return LoanOut(
         id=ln.id,
         person_name=ln.person_name,
         loan_type=ln.loan_type,
         principal_amount=ln.principal_amount,
         repaid_amount=ln.repaid_amount,
-        remaining_amount=rem,
+        remaining_amount=new_rem,
+        account_id=ln.account_id,
+        account_name=ln.account.name if ln.account else None,
+        member_id=payload.member_id or ln.member_id,
+        member_name=member.name if member else (ln.member.name if ln.member else None),
         due_date=ln.due_date,
         description=ln.description,
         is_settled=ln.is_settled

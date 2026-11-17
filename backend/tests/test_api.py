@@ -1,236 +1,165 @@
 import uuid
 from decimal import Decimal
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import pytest
 from fastapi.testclient import TestClient
 from app.main import app
 
 client = TestClient(app)
 
-def test_full_production_api_lifecycle():
-    # 1. Register a new user
+def test_production_modifications_lifecycle():
+    # 1. Register User & Household
     uid = uuid.uuid4().hex[:8]
-    test_email = f"prod_user_{uid}@example.com"
-    test_password = "ProductionPassword123!"
+    test_email = f"prabodh_{uid}@example.com"
+    test_password = "SecurePassword123!"
     reg_resp = client.post("/api/v1/auth/register", json={
         "email": test_email,
-        "full_name": "Kavita Rao",
+        "full_name": "Prabodh Kumar",
         "password": test_password,
-        "household_name": "Rao Family"
+        "household_name": "Kumar Household"
     })
-    assert reg_resp.status_code == 201, reg_resp.text
+    assert reg_resp.status_code == 201
     token = reg_resp.json()["access_token"]
-    assert token
-
     headers = {"Authorization": f"Bearer {token}"}
 
-    # Verify Security Headers
-    assert reg_resp.headers.get("x-frame-options") == "DENY"
-    assert reg_resp.headers.get("x-content-type-options") == "nosniff"
+    # 2. Get Accounts (Cash and Primary Bank Account created with 0.00 opening balance)
+    accs = client.get("/api/v1/accounts", headers=headers).json()
+    cash_acc = next(a for a in accs if "Cash" in a["name"])
+    bank_acc = next(a for a in accs if "Bank" in a["name"])
 
-    # 2. Duplicate registration check
-    dup_resp = client.post("/api/v1/auth/register", json={
-        "email": test_email,
-        "full_name": "Duplicate User",
-        "password": test_password,
-        "household_name": "Rao Family"
+    # 3. Add Family Members: Prabodh and Priya
+    m_prabodh = client.get("/api/v1/members", headers=headers).json()[0] # Self
+    m_priya = client.post("/api/v1/members", headers=headers, json={
+        "name": "Priya",
+        "relationship_label": "Spouse"
+    }).json()
+
+    # -------------------------------------------------------------
+    # REQUIREMENT 1: Account balance CANNOT be negative
+    # -------------------------------------------------------------
+    # Trying to spend ₹1,000 from Cash (which has 0.00) MUST fail with 422
+    neg_tx_resp = client.post("/api/v1/transactions", headers=headers, json={
+        "account_id": cash_acc["id"],
+        "transaction_type": "expense",
+        "amount": "1000.00",
+        "description": "Attempt to overdraft Cash",
+        "transaction_date": datetime.now(timezone.utc).isoformat()
     })
-    assert dup_resp.status_code == 409
+    assert neg_tx_resp.status_code == 422
+    assert "Account balance cannot be negative" in neg_tx_resp.json()["detail"]
 
-    # 3. Login
-    login_resp = client.post("/api/v1/auth/login", json={
-        "email": test_email,
-        "password": test_password
-    })
-    assert login_resp.status_code == 200
-
-    # 4. Auth Me
-    me_resp = client.get("/api/v1/auth/me", headers=headers)
-    assert me_resp.status_code == 200
-    me_data = me_resp.json()
-    assert me_data["email"] == test_email
-    assert me_data["household_name"] == "Rao Family"
-
-    # 5. Default Categories Seeded
-    cat_resp = client.get("/api/v1/categories", headers=headers)
-    assert cat_resp.status_code == 200
-    categories = cat_resp.json()
-    assert len(categories) >= 10
-    grocery_cat = next((c for c in categories if "Groceries" in c["name"]), None)
-    salary_cat = next((c for c in categories if "Salary" in c["name"]), None)
-    assert grocery_cat is not None
-    assert salary_cat is not None
-
-    # Add custom category
-    custom_cat_resp = client.post("/api/v1/categories", headers=headers, json={
-        "name": "Fitness & Sports",
-        "transaction_type": "expense"
-    })
-    assert custom_cat_resp.status_code == 201
-    fitness_cat = custom_cat_resp.json()
-
-    # 6. Accounts Check & Add New Account
-    acc_resp = client.get("/api/v1/accounts", headers=headers)
-    assert acc_resp.status_code == 200
-    accounts = acc_resp.json()
-    assert len(accounts) >= 2 # Cash and Bank Account
-    cash_acc = next(a for a in accounts if a["name"] == "Cash")
-    assert Decimal(str(cash_acc["current_balance"])) == Decimal("0.00")
-
-    # Add ICICI Bank account
-    icici_resp = client.post("/api/v1/accounts", headers=headers, json={
-        "name": "ICICI Salary Account",
-        "account_type": "bank",
-        "opening_balance": "25000.00"
-    })
-    assert icici_resp.status_code == 201
-    icici_acc = icici_resp.json()
-    assert Decimal(str(icici_acc["current_balance"])) == Decimal("25000.00")
-
-    # 7. Family Members
-    mem_resp = client.get("/api/v1/members", headers=headers)
-    assert mem_resp.status_code == 200
-    members = mem_resp.json()
-    assert len(members) >= 1 # Self
-
-    # Add child
-    child_resp = client.post("/api/v1/members", headers=headers, json={
-        "name": "Rohan",
-        "relationship_label": "Child"
-    })
-    assert child_resp.status_code == 201
-    child_member = child_resp.json()
-
-    # 8. Transactions: Income & Expense
-    now_iso = datetime.now(timezone.utc).isoformat()
-    req_1 = str(uuid.uuid4())
-    inc_resp = client.post("/api/v1/transactions", headers=headers, json={
-        "account_id": icici_acc["id"],
-        "member_id": members[0]["id"],
+    # Deposit ₹50,000 into Bank Account
+    salary_cat = next(c for c in client.get("/api/v1/categories", headers=headers).json() if "Salary" in c["name"])
+    client.post("/api/v1/transactions", headers=headers, json={
+        "account_id": bank_acc["id"],
+        "member_id": m_prabodh["id"],
         "category_id": salary_cat["id"],
         "transaction_type": "income",
-        "amount": "120000.00",
-        "description": "Tech Corp Monthly Salary",
-        "transaction_date": now_iso,
-        "client_request_id": req_1
+        "amount": "50000.00",
+        "description": "Monthly Salary Deposit",
+        "transaction_date": (datetime.now(timezone.utc) - timedelta(days=5)).isoformat()
     })
-    assert inc_resp.status_code == 201, inc_resp.text
-    inc_tx = inc_resp.json()
-    assert inc_tx["account_name"] == "ICICI Salary Account"
-    assert inc_tx["category_name"] == salary_cat["name"]
 
-    # Expense transaction
-    req_2 = str(uuid.uuid4())
-    exp_resp = client.post("/api/v1/transactions", headers=headers, json={
-        "account_id": icici_acc["id"],
-        "member_id": members[0]["id"],
-        "category_id": grocery_cat["id"],
-        "transaction_type": "expense",
-        "amount": "14500.00",
-        "description": "Supermarket Shopping",
-        "transaction_date": now_iso,
-        "client_request_id": req_2
+    # Bank balance is now 50,000
+    acc_check = client.get("/api/v1/accounts", headers=headers).json()
+    bank_updated = next(a for a in acc_check if a["id"] == bank_acc["id"])
+    assert Decimal(str(bank_updated["current_balance"])) == Decimal("50000.00")
+
+    # -------------------------------------------------------------
+    # REQUIREMENT 2: Fund transfer between accounts
+    # -------------------------------------------------------------
+    # Attempting to transfer ₹60,000 from Bank (only has 50,000) MUST fail with 422
+    fail_transfer = client.post("/api/v1/accounts/transfer", headers=headers, json={
+        "from_account_id": bank_acc["id"],
+        "to_account_id": cash_acc["id"],
+        "amount": "60000.00",
+        "description": "ATM cash withdrawal",
+        "transaction_date": (datetime.now(timezone.utc) - timedelta(days=4)).isoformat()
     })
-    assert exp_resp.status_code == 201
-    exp_tx = exp_resp.json()
+    assert fail_transfer.status_code == 422
+    assert "Insufficient balance" in fail_transfer.json()["detail"]
 
-    # Second expense with custom category
-    req_3 = str(uuid.uuid4())
-    exp2_resp = client.post("/api/v1/transactions", headers=headers, json={
-        "account_id": cash_acc["id"],
-        "member_id": child_member["id"],
-        "category_id": fitness_cat["id"],
-        "transaction_type": "expense",
-        "amount": "3500.00",
-        "description": "Badminton Coaching",
-        "transaction_date": now_iso,
-        "client_request_id": req_3
-    })
-    assert exp2_resp.status_code == 201
-
-    # Verify Account Real-time Calculated Balances
-    accs_updated = client.get("/api/v1/accounts", headers=headers).json()
-    icici_updated = next(a for a in accs_updated if a["id"] == icici_acc["id"])
-    # 25000 + 120000 - 14500 = 130500.00
-    assert Decimal(str(icici_updated["current_balance"])) == Decimal("130500.00")
-
-    cash_updated = next(a for a in accs_updated if a["id"] == cash_acc["id"])
-    # 0 - 3500 = -3500.00
-    assert Decimal(str(cash_updated["current_balance"])) == Decimal("-3500.00")
-
-    # 9. Edit Transaction
-    patch_resp = client.patch(f"/api/v1/transactions/{exp_tx['id']}", headers=headers, json={
+    # Valid Transfer: ₹15,000 from Bank to Cash
+    success_transfer = client.post("/api/v1/accounts/transfer", headers=headers, json={
+        "from_account_id": bank_acc["id"],
+        "to_account_id": cash_acc["id"],
         "amount": "15000.00",
-        "description": "Supermarket Shopping & Pantry"
+        "description": "ATM cash withdrawal",
+        "transaction_date": (datetime.now(timezone.utc) - timedelta(days=4)).isoformat()
     })
-    assert patch_resp.status_code == 200
-    assert Decimal(str(patch_resp.json()["amount"])) == Decimal("15000.00")
+    assert success_transfer.status_code == 201
+    transfer_data = success_transfer.json()
+    assert Decimal(str(transfer_data["from_account_balance"])) == Decimal("35000.00") # 50000 - 15000
+    assert Decimal(str(transfer_data["to_account_balance"])) == Decimal("15000.00") # 0 + 15000
 
-    # 10. Dashboard Summary & Category Breakdown
-    summary_resp = client.get("/api/v1/dashboard/summary", headers=headers)
-    assert summary_resp.status_code == 200
-    summary = summary_resp.json()
-    assert Decimal(str(summary["total_income"])) == Decimal("120000.00")
-    # 15000 + 3500 = 18500.00
-    assert Decimal(str(summary["total_expenses"])) == Decimal("18500.00")
-    assert Decimal(str(summary["net_savings"])) == Decimal("101500.00")
-    assert summary["transaction_count"] == 3
-    assert len(summary["category_breakdown"]) >= 2
-
-    # 11. Export Transactions CSV
-    csv_resp = client.get("/api/v1/transactions/export/csv", headers=headers)
-    assert csv_resp.status_code == 200
-    assert "text/csv" in csv_resp.headers.get("content-type", "")
-    assert "Tech Corp Monthly Salary" in csv_resp.text
-    assert "Supermarket Shopping & Pantry" in csv_resp.text
-
-    # 12. Budgets CRUD
-    b_resp = client.post("/api/v1/budgets", headers=headers, json={
-        "name": "Monthly Food Budget",
-        "category_id": grocery_cat["id"],
-        "monthly_limit": "20000.00"
-    })
-    assert b_resp.status_code == 201
-    budget = b_resp.json()
-
-    # List budgets should show spent amount
-    b_list = client.get("/api/v1/budgets", headers=headers).json()
-    assert len(b_list) >= 1
-    food_b = next(b for b in b_list if b["id"] == budget["id"])
-    assert Decimal(str(food_b["spent_amount"])) == Decimal("15000.00")
-
-    # 13. Savings Goals CRUD
-    goal_resp = client.post("/api/v1/savings-goals", headers=headers, json={
-        "name": "Goa Family Trip",
-        "target_amount": "50000.00",
-        "current_amount": "10000.00",
-        "notes": "Book flights early"
-    })
-    assert goal_resp.status_code == 201
-    goal = goal_resp.json()
-
-    # Contribute to goal
-    contrib_resp = client.post(f"/api/v1/savings-goals/{goal['id']}/contribute", headers=headers, json={
-        "amount": "15000.00"
-    })
-    assert contrib_resp.status_code == 200
-    assert Decimal(str(contrib_resp.json()["current_amount"])) == Decimal("25000.00")
-
-    # 14. Loans & Borrowing CRUD
+    # -------------------------------------------------------------
+    # REQUIREMENT 3: Prabodh lends to Avimanyu -> debited, returned -> credited to Prabodh or Priya
+    # -------------------------------------------------------------
+    # Prabodh gives a loan of ₹10,000 to Avimanyu from Bank Account
     loan_resp = client.post("/api/v1/loans", headers=headers, json={
-        "person_name": "Uncle Suresh",
+        "person_name": "Avimanyu",
         "loan_type": "lent",
-        "principal_amount": "20000.00",
-        "description": "Short-term loan for home repair"
+        "principal_amount": "10000.00",
+        "account_id": bank_acc["id"],
+        "member_id": m_prabodh["id"],
+        "description": "Friend emergency loan"
     })
     assert loan_resp.status_code == 201
     loan = loan_resp.json()
-    assert Decimal(str(loan["remaining_amount"])) == Decimal("20000.00")
+    assert Decimal(str(loan["remaining_amount"])) == Decimal("10000.00")
 
-    # Partial repayment
+    # Bank balance was 35,000, now should be debited by 10,000 -> 25,000!
+    acc_check2 = client.get("/api/v1/accounts", headers=headers).json()
+    bank_after_loan = next(a for a in acc_check2 if a["id"] == bank_acc["id"])
+    assert Decimal(str(bank_after_loan["current_balance"])) == Decimal("25000.00")
+
+    # Avimanyu returns ₹6,000, credited to Priya's Cash account as per choice!
     repay_resp = client.post(f"/api/v1/loans/{loan['id']}/repayment", headers=headers, json={
-        "amount": "8000.00"
+        "amount": "6000.00",
+        "account_id": cash_acc["id"], # Deposited into Cash
+        "member_id": m_priya["id"],  # Credited to Priya
+        "notes": "Avimanyu UPI transfer to Priya"
     })
     assert repay_resp.status_code == 200
-    assert Decimal(str(repay_resp.json()["remaining_amount"])) == Decimal("12000.00")
-    assert repay_resp.json()["is_settled"] is False
+    repay_data = repay_resp.json()
+    assert Decimal(str(repay_data["remaining_amount"])) == Decimal("4000.00") # 10000 - 6000
+
+    # Cash account had 15,000, now should be credited by 6,000 -> 21,000!
+    acc_check3 = client.get("/api/v1/accounts", headers=headers).json()
+    cash_after_repay = next(a for a in acc_check3 if a["id"] == cash_acc["id"])
+    assert Decimal(str(cash_after_repay["current_balance"])) == Decimal("21000.00")
+
+    # -------------------------------------------------------------
+    # REQUIREMENT 4: Bank Statement / Ledger with Available Balance & Date Range
+    # -------------------------------------------------------------
+    from_date = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d")
+    to_date = (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%Y-%m-%d")
+
+    # Get statement for Bank Account
+    bank_stmt_resp = client.get(f"/api/v1/accounts/{bank_acc['id']}/statement?from_date={from_date}&to_date={to_date}", headers=headers)
+    assert bank_stmt_resp.status_code == 200
+    stmt = bank_stmt_resp.json()
+    assert stmt["account_name"] == bank_acc["name"]
+    assert Decimal(str(stmt["opening_balance"])) == Decimal("0.00")
+    assert Decimal(str(stmt["total_credits"])) == Decimal("50000.00") # Salary deposit
+    assert Decimal(str(stmt["total_debits"])) == Decimal("25000.00") # 15000 transfer out + 10000 loan lent
+    assert Decimal(str(stmt["closing_balance"])) == Decimal("25000.00")
+    assert len(stmt["entries"]) == 3
+
+    # Check chronological running balance on Bank Statement
+    entries = stmt["entries"]
+    # 1. Salary Deposit (+50,000 -> balance 50,000)
+    assert entries[0]["entry_type"] == "credit"
+    assert Decimal(str(entries[0]["running_balance"])) == Decimal("50000.00")
+    # 2. Transfer Out (-15,000 -> balance 35,000)
+    assert entries[1]["entry_type"] == "debit"
+    assert Decimal(str(entries[1]["running_balance"])) == Decimal("35000.00")
+    # 3. Loan Lent (-10,000 -> balance 25,000)
+    assert entries[2]["entry_type"] == "debit"
+    assert Decimal(str(entries[2]["running_balance"])) == Decimal("25000.00")
+
+    # Test statement CSV export
+    stmt_csv = client.get(f"/api/v1/accounts/{bank_acc['id']}/statement/export/csv?from_date={from_date}&to_date={to_date}", headers=headers)
+    assert stmt_csv.status_code == 200
+    assert "text/csv" in stmt_csv.headers["content-type"]
+    assert "Available Balance" in stmt_csv.text

@@ -1,3 +1,4 @@
+from __future__ import annotations
 import enum
 import uuid
 from datetime import datetime, timezone
@@ -70,7 +71,10 @@ class Transaction(Base):
     member_id: Mapped[str | None] = mapped_column(ForeignKey("family_members.id", ondelete="SET NULL"), nullable=True)
     account_id: Mapped[str] = mapped_column(ForeignKey("accounts.id", ondelete="RESTRICT"))
     category_id: Mapped[str | None] = mapped_column(ForeignKey("categories.id", ondelete="SET NULL"), nullable=True)
+    transfer_account_id: Mapped[str | None] = mapped_column(ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True)
+    loan_id: Mapped[str | None] = mapped_column(ForeignKey("loans.id", ondelete="SET NULL"), nullable=True)
     transaction_type: Mapped[TransactionType] = mapped_column(Enum(TransactionType))
+    direction: Mapped[str | None] = mapped_column(String(10), nullable=True) # "in" or "out"
     amount: Mapped[Decimal] = mapped_column(Numeric(14, 2))
     description: Mapped[str] = mapped_column(String(240))
     transaction_date: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
@@ -78,9 +82,11 @@ class Transaction(Base):
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     
-    member: Mapped[FamilyMember | None] = relationship()
-    account: Mapped[Account] = relationship()
-    category: Mapped[Category | None] = relationship()
+    member: Mapped[FamilyMember | None] = relationship(foreign_keys=[member_id])
+    account: Mapped[Account] = relationship(foreign_keys=[account_id])
+    category: Mapped[Category | None] = relationship(foreign_keys=[category_id])
+    transfer_account: Mapped[Account | None] = relationship(foreign_keys=[transfer_account_id])
+    loan: Mapped[Loan | None] = relationship(foreign_keys=[loan_id])
 
     __table_args__ = (
         Index("ix_transactions_household_date", "household_id", "transaction_date"),
@@ -122,8 +128,13 @@ class Loan(Base):
     repaid_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=Decimal("0.00"))
     due_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     description: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    member_id: Mapped[str | None] = mapped_column(ForeignKey("family_members.id", ondelete="SET NULL"), nullable=True)
+    account_id: Mapped[str | None] = mapped_column(ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True)
     is_settled: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    member: Mapped[FamilyMember | None] = relationship(foreign_keys=[member_id])
+    account: Mapped[Account | None] = relationship(foreign_keys=[account_id])
 
 class AuditLog(Base):
     __tablename__ = "audit_logs"
