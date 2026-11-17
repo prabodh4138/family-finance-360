@@ -273,3 +273,113 @@ def test_family_member_accounts_auth_and_admin_controls():
     audit_logs = client.get("/api/v1/admin/audit-logs", headers=admin_headers)
     assert audit_logs.status_code == 200
     assert len(audit_logs.json()) >= 2
+
+
+def test_mandatory_password_change_and_opening_balance_update():
+    admin_email = f"admin_pw_{uuid.uuid4().hex[:6]}@family.org"
+    reg = client.post("/api/v1/auth/register", json={
+        "email": admin_email,
+        "full_name": "Admin Tester",
+        "password": "AdminPassword123!",
+        "household_name": "Test Household"
+    })
+    assert reg.status_code == 201
+    admin_token = reg.json()["access_token"]
+    assert reg.json()["must_change_password"] is False
+    admin_headers = {"Authorization": f"Bearer {admin_token}"}
+
+    # 1. Create Account with 0.00 opening balance
+    acc_res = client.post("/api/v1/accounts", headers=admin_headers, json={
+        "name": "Sanjukta SBI 7378",
+        "account_type": "bank",
+        "opening_balance": "0.00"
+    })
+    assert acc_res.status_code == 201
+    acc_id = acc_res.json()["id"]
+    assert Decimal(str(acc_res.json()["opening_balance"])) == Decimal("0.00")
+    assert Decimal(str(acc_res.json()["current_balance"])) == Decimal("0.00")
+
+    # 2. Update opening balance using PUT
+    up_put = client.put(f"/api/v1/accounts/{acc_id}", headers=admin_headers, json={
+        "opening_balance": "35000.00"
+    })
+    assert up_put.status_code == 200
+    assert Decimal(str(up_put.json()["opening_balance"])) == Decimal("35000.00")
+    assert Decimal(str(up_put.json()["current_balance"])) == Decimal("35000.00")
+
+    # 3. Update opening balance using PATCH
+    up_patch = client.patch(f"/api/v1/accounts/{acc_id}", headers=admin_headers, json={
+        "opening_balance": "42000.00"
+    })
+    assert up_patch.status_code == 200
+    assert Decimal(str(up_patch.json()["opening_balance"])) == Decimal("42000.00")
+    assert Decimal(str(up_patch.json()["current_balance"])) == Decimal("42000.00")
+
+    # 4. Admin adds family member with temporary initial password
+    sanjukta_email = f"sanjukta_{uuid.uuid4().hex[:6]}@family.org"
+    temp_pass = "TempPassword123!"
+    add_mem = client.post("/api/v1/members", headers=admin_headers, json={
+        "name": "Sanjukta",
+        "relationship_label": "Wife",
+        "email": sanjukta_email,
+        "role": "member",
+        "initial_password": temp_pass
+    })
+    assert add_mem.status_code == 201
+
+    # 5. Sanjukta logs in with temporary password -> must_change_password is True
+    sanjukta_login = client.post("/api/v1/auth/login", json={
+        "email": sanjukta_email,
+        "password": temp_pass
+    })
+    assert sanjukta_login.status_code == 200
+    assert sanjukta_login.json()["must_change_password"] is True
+    sanjukta_token = sanjukta_login.json()["access_token"]
+    sanjukta_headers = {"Authorization": f"Bearer {sanjukta_token}"}
+
+    # Verify /auth/me returns must_change_password: True
+    me_resp = client.get("/api/v1/auth/me", headers=sanjukta_headers)
+    assert me_resp.status_code == 200
+    assert me_resp.json()["must_change_password"] is True
+
+    # 6. Sanjukta changes password to new secure password
+    new_pass = "SanjuktaSecure789!"
+    change_resp = client.post("/api/v1/auth/change-password", headers=sanjukta_headers, json={
+        "new_password": new_pass
+    })
+    assert change_resp.status_code == 200
+
+    # Verify /auth/me now returns must_change_password: False
+    me_after = client.get("/api/v1/auth/me", headers=sanjukta_headers)
+    assert me_after.status_code == 200
+    assert me_after.json()["must_change_password"] is False
+
+    # 7. Old password no longer works
+    old_fail = client.post("/api/v1/auth/login", json={
+        "email": sanjukta_email,
+        "password": temp_pass
+    })
+    assert old_fail.status_code == 401
+
+    # 8. New password logs in with must_change_password: False
+    login_new = client.post("/api/v1/auth/login", json={
+        "email": sanjukta_email,
+        "password": new_pass
+    })
+    assert login_new.status_code == 200
+    assert login_new.json()["must_change_password"] is False
+
+    # 9. Admin resets Sanjukta password -> sets must_change_password back to True
+    reset_temp = "AnotherTempPass999!"
+    reset_resp = client.post(f"/api/v1/members/{add_mem.json()['id']}/reset-password", headers=admin_headers, json={
+        "new_password": reset_temp
+    })
+    assert reset_resp.status_code == 200
+
+    login_after_reset = client.post("/api/v1/auth/login", json={
+        "email": sanjukta_email,
+        "password": reset_temp
+    })
+    assert login_after_reset.status_code == 200
+    assert login_after_reset.json()["must_change_password"] is True
+

@@ -132,6 +132,10 @@ export default function App() {
   const [accOwnerMember, setAccOwnerMember] = useState('');
   const [editingAccount, setEditingAccount] = useState<Account | null>(null);
 
+  // Mandatory password change state for newly provisioned / reset accounts
+  const [newPasswordMandatory, setNewPasswordMandatory] = useState('');
+  const [confirmPasswordMandatory, setConfirmPasswordMandatory] = useState('');
+
   // Admin household settings & audit logs
   const [householdEditName, setHouseholdEditName] = useState('');
   const [householdEditCurrency, setHouseholdEditCurrency] = useState('INR');
@@ -274,6 +278,9 @@ export default function App() {
         : await api.login(email, password);
       localStorage.setItem('ff360_access_token', result.access_token);
       setToken(result.access_token);
+      if (result.must_change_password) {
+        setUserProfile(prev => (prev ? { ...prev, must_change_password: true } : ({ must_change_password: true } as any)));
+      }
       notifySuccess(registerMode ? 'Household created successfully!' : 'Signed in securely!');
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Unable to sign in');
@@ -557,6 +564,31 @@ export default function App() {
     }
     return { title: 'Good night', icon: '🌙', sub: 'All accounts are balanced and secured. Sleep well!' };
   }, []);
+
+  async function handleMandatoryPasswordChange(e: React.FormEvent) {
+    e.preventDefault();
+    if (!newPasswordMandatory || newPasswordMandatory.length < 6) {
+      setError('Password must be at least 6 characters long.');
+      return;
+    }
+    if (newPasswordMandatory !== confirmPasswordMandatory) {
+      setError('New passwords do not match. Please verify.');
+      return;
+    }
+    setBusy(true);
+    setError('');
+    try {
+      await api.changePassword(newPasswordMandatory);
+      notifySuccess('Password updated successfully! Welcome to Family Finance 360.');
+      setUserProfile(prev => (prev ? { ...prev, must_change_password: false } : null));
+      setNewPasswordMandatory('');
+      setConfirmPasswordMandatory('');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to update password');
+    } finally {
+      setBusy(false);
+    }
+  }
 
   if (!token) {
     return (
@@ -2845,6 +2877,53 @@ export default function App() {
                 </button>
               </form>
             )}
+          </section>
+        </div>
+      )}
+
+      {/* Mandatory Password Change on First Sign-in */}
+      {token && userProfile?.must_change_password && (
+        <div className="modal-backdrop" style={{ zIndex: 99999, backgroundColor: 'rgba(15, 23, 42, 0.85)', backdropFilter: 'blur(8px)' }}>
+          <section className="modal" style={{ maxWidth: 440, border: '2px solid var(--primary, #3b82f6)' }}>
+            <div className="modal-head">
+              <h2>🔐 Password Change Required</h2>
+            </div>
+            <form className="form-stack" onSubmit={handleMandatoryPasswordChange}>
+              <div style={{ background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 8, padding: '10px 14px', fontSize: 12, color: '#1e40af', lineHeight: 1.5, margin: '4px 0 14px' }}>
+                👋 Welcome, <b>{userProfile.full_name || 'Family Member'}</b>! Because your account was configured with a temporary or reset password by your Family Administrator, you must choose a secure personal password before continuing.
+              </div>
+              <label>
+                New Password (minimum 6 characters)
+                <input
+                  type="password"
+                  required
+                  minLength={6}
+                  value={newPasswordMandatory}
+                  onChange={e => setNewPasswordMandatory(e.target.value)}
+                  placeholder="Enter your new secure password"
+                  autoFocus
+                />
+              </label>
+              <label>
+                Confirm New Password
+                <input
+                  type="password"
+                  required
+                  minLength={6}
+                  value={confirmPasswordMandatory}
+                  onChange={e => setConfirmPasswordMandatory(e.target.value)}
+                  placeholder="Re-enter your new password"
+                />
+              </label>
+              <div className="form-actions" style={{ marginTop: 16 }}>
+                <button type="button" className="secondary" onClick={logout} title="Sign out to exit">
+                  Sign Out
+                </button>
+                <button type="submit" className="primary" disabled={busy}>
+                  {busy ? 'Securing Account…' : 'Set Password & Access App'}
+                </button>
+              </div>
+            </form>
           </section>
         </div>
       )}

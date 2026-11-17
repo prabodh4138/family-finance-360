@@ -16,6 +16,7 @@ class LoginIn(BaseModel):
 class TokenOut(BaseModel):
     access_token: str
     token_type: str = "bearer"
+    must_change_password: bool = False
 
 class UserMeOut(BaseModel):
     id: str
@@ -27,6 +28,10 @@ class UserMeOut(BaseModel):
     currency: str
     member_id: str | None = None
     member_name: str | None = None
+    must_change_password: bool = False
+
+class ChangePasswordIn(BaseModel):
+    new_password: str = Field(min_length=6, max_length=128)
 
 class MemberIn(BaseModel):
     name: str = Field(min_length=2, max_length=120)

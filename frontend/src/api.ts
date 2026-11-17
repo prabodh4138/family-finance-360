@@ -32,6 +32,7 @@ export interface UserMe {
   currency: string;
   member_id?: string | null;
   member_name?: string | null;
+  must_change_password?: boolean;
 }
 
 export interface Member {
@@ -219,10 +220,21 @@ export interface TransferPayload {
 export const api = {
   // Auth
   login: (email: string, password: string) =>
-    request<{ access_token: string }>('/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) }),
+    request<{ access_token: string; token_type?: string; must_change_password?: boolean }>('/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ email, password }),
+    }),
   register: (payload: { email: string; full_name: string; password: string; household_name?: string }) =>
-    request<{ access_token: string }>('/auth/register', { method: 'POST', body: JSON.stringify(payload) }),
+    request<{ access_token: string; token_type?: string; must_change_password?: boolean }>('/auth/register', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
   me: () => request<UserMe>('/auth/me'),
+  changePassword: (new_password: string) =>
+    request<{ message: string }>('/auth/change-password', {
+      method: 'POST',
+      body: JSON.stringify({ new_password }),
+    }),
 
   // Categories
   categories: () => request<Category[]>('/categories'),

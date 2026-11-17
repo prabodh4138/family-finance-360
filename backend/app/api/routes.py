@@ -12,7 +12,7 @@ from app.models.entities import (
     Category, Budget, SavingsGoal, Loan, TransactionType
 )
 from app.schemas.api import (
-    RegisterIn, LoginIn, TokenOut, UserMeOut,
+    RegisterIn, LoginIn, TokenOut, UserMeOut, ChangePasswordIn,
     MemberIn, MemberOut, MemberUpdateIn, MemberPasswordResetIn,
     AccountIn, AccountOut, AccountUpdateIn, TransferIn, TransferOut,
     CategoryIn, CategoryOut,
@@ -181,7 +181,7 @@ def login(payload: LoginIn, db: Session = Depends(get_db)):
         raise HTTPException(status_code=401, detail="Incorrect email or password")
     if not user.is_active:
         raise HTTPException(status_code=403, detail="User account is deactivated")
-    return TokenOut(access_token=create_access_token(user.id))
+    return TokenOut(access_token=create_access_token(user.id), must_change_password=user.must_change_password)
 
 @router.get("/auth/me", response_model=UserMeOut)
 def me(user: User = Depends(current_user), h: Household = Depends(current_household), db: Session = Depends(get_db)):
@@ -195,8 +195,29 @@ def me(user: User = Depends(current_user), h: Household = Depends(current_househ
         household_name=h.name,
         currency=h.currency,
         member_id=linked_member.id if linked_member else None,
-        member_name=linked_member.name if linked_member else user.full_name
+        member_name=linked_member.name if linked_member else user.full_name,
+        must_change_password=user.must_change_password
     )
+
+@router.post("/auth/change-password")
+def change_password(
+    payload: ChangePasswordIn,
+    user: User = Depends(current_user),
+    h: Household = Depends(current_household),
+    db: Session = Depends(get_db)
+):
+    user.password_hash = hash_password(payload.new_password)
+    user.must_change_password = False
+    db.add(AuditLog(
+        household_id=h.id,
+        actor_user_id=user.id,
+        entity_type="user",
+        entity_id=user.id,
+        action="change_password",
+        details=f"User {user.email} updated their password."
+    ))
+    db.commit()
+    return {"message": "Password changed successfully."}
 
 
 # ==========================================
@@ -280,7 +301,8 @@ def add_member(
                 full_name=payload.name,
                 password_hash=hash_password(payload.initial_password),
                 role=payload.role,
-                household_id=h.id
+                household_id=h.id,
+                must_change_password=True
             )
             db.add(new_u)
             db.flush()
@@ -339,6 +361,7 @@ def add_member(
     )
 
 @router.put("/members/{member_id}", response_model=MemberOut)
+@router.patch("/members/{member_id}", response_model=MemberOut)
 def update_member(
     member_id: str,
     payload: MemberUpdateIn,
@@ -424,7 +447,8 @@ def reset_member_password(
             full_name=member.name,
             password_hash=hash_password(payload.new_password),
             role=member.role,
-            household_id=h.id
+            household_id=h.id,
+            must_change_password=True
         )
         db.add(new_u)
         db.flush()
@@ -434,6 +458,7 @@ def reset_member_password(
         if not target_user:
             raise HTTPException(status_code=404, detail="User account not found")
         target_user.password_hash = hash_password(payload.new_password)
+        target_user.must_change_password = True
 
     db.add(AuditLog(
         household_id=h.id,
@@ -522,6 +547,7 @@ def add_account(payload: AccountIn, user: User = Depends(current_user), h: House
     )
 
 @router.put("/accounts/{account_id}", response_model=AccountOut)
+@router.patch("/accounts/{account_id}", response_model=AccountOut)
 def update_account(
     account_id: str,
     payload: AccountUpdateIn,
@@ -1486,6 +1512,7 @@ def delete_loan(loan_id: str, h: Household = Depends(current_household), db: Ses
 # ==========================================
 
 @router.put("/admin/household")
+@router.patch("/admin/household")
 def update_household(
     payload: HouseholdUpdateIn,
     user: User = Depends(require_admin),
