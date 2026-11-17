@@ -35,13 +35,14 @@ services:
   # -------------------------------------------------------------
   # 2. Frontend Static Site (React + Vite PWA)
   # -------------------------------------------------------------
-  - type: static
+  - type: web
+    runtime: static
     name: family-finance-360-frontend
     plan: free
     region: oregon
     rootDir: frontend
     buildCommand: npm install && npm run build
-    staticPublishPath: dist
+    staticPublishPath: ./dist
     autoDeploy: true
     routes:
       - type: rewrite
