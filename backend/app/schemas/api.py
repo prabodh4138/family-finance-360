@@ -228,6 +228,7 @@ class LoanIn(BaseModel):
     principal_amount: Decimal = Field(gt=0, max_digits=14, decimal_places=2)
     account_id: str
     member_id: str | None = None
+    loan_date: datetime | None = None
     due_date: datetime | None = None
     description: str | None = None
 
@@ -235,6 +236,7 @@ class LoanRepaymentIn(BaseModel):
     amount: Decimal = Field(gt=0, max_digits=14, decimal_places=2)
     account_id: str
     member_id: str | None = None
+    repayment_date: datetime | None = None
     notes: str | None = None
 
 class LoanOut(BaseModel):
@@ -248,9 +250,11 @@ class LoanOut(BaseModel):
     account_name: str | None = None
     member_id: str | None = None
     member_name: str | None = None
+    loan_date: datetime | None = None
     due_date: datetime | None = None
     description: str | None = None
     is_settled: bool
+    created_at: datetime | None = None
     model_config = ConfigDict(from_attributes=True)
 
 # -------------------------------------------------------------

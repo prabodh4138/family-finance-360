@@ -651,11 +651,14 @@ def transfer_funds(
         )
 
     # 2. Record Debit (Transfer Out)
+    out_member_id = from_acc.member_id or payload.member_id
+    in_member_id = to_acc.member_id or payload.member_id
+
     tx_out = Transaction(
         household_id=h.id,
         account_id=from_acc.id,
         transfer_account_id=to_acc.id,
-        member_id=payload.member_id,
+        member_id=out_member_id,
         transaction_type=TransactionType.transfer,
         direction="out",
         amount=payload.amount,
@@ -669,7 +672,7 @@ def transfer_funds(
         household_id=h.id,
         account_id=to_acc.id,
         transfer_account_id=from_acc.id,
-        member_id=payload.member_id,
+        member_id=in_member_id,
         transaction_type=TransactionType.transfer,
         direction="in",
         amount=payload.amount,
@@ -1309,7 +1312,7 @@ def delete_savings_goal(goal_id: str, h: Household = Depends(current_household),
 
 @router.get("/loans", response_model=list[LoanOut])
 def list_loans(h: Household = Depends(current_household), db: Session = Depends(get_db)):
-    loans = db.query(Loan).filter(Loan.household_id == h.id).order_by(Loan.is_settled, Loan.created_at.desc()).all()
+    loans = db.query(Loan).filter(Loan.household_id == h.id).order_by(Loan.is_settled, Loan.loan_date.desc()).all()
     results = []
     for ln in loans:
         rem = max(Decimal("0.00"), ln.principal_amount - ln.repaid_amount)
@@ -1324,9 +1327,11 @@ def list_loans(h: Household = Depends(current_household), db: Session = Depends(
             account_name=ln.account.name if ln.account else None,
             member_id=ln.member_id,
             member_name=ln.member.name if ln.member else None,
+            loan_date=ln.loan_date or ln.created_at,
             due_date=ln.due_date,
             description=ln.description,
-            is_settled=ln.is_settled
+            is_settled=ln.is_settled,
+            created_at=ln.created_at
         ))
     return results
 
@@ -1356,8 +1361,19 @@ def add_loan(
                 detail=f"Cannot give loan of ₹{payload.principal_amount:,.2f}. Account '{account.name}' only has available balance ₹{current_bal:,.2f}."
             )
 
-    # 2. Create Loan
-    ln = Loan(household_id=h.id, **payload.model_dump())
+    # 2. Create Loan with specified loan_date
+    target_date = payload.loan_date or datetime.now(timezone.utc)
+    ln = Loan(
+        household_id=h.id,
+        person_name=payload.person_name,
+        loan_type=payload.loan_type,
+        principal_amount=payload.principal_amount,
+        account_id=payload.account_id,
+        member_id=payload.member_id,
+        loan_date=target_date,
+        due_date=payload.due_date,
+        description=payload.description
+    )
     db.add(ln)
     db.flush()
 
@@ -1367,26 +1383,26 @@ def add_loan(
         tx = Transaction(
             household_id=h.id,
             account_id=account.id,
-            member_id=payload.member_id,
+            member_id=payload.member_id or account.member_id,
             loan_id=ln.id,
             transaction_type=TransactionType.expense,
             direction="out",
             amount=payload.principal_amount,
             description=f"Loan given to {payload.person_name} ({payload.description or 'Personal Loan'})",
-            transaction_date=datetime.now(timezone.utc)
+            transaction_date=target_date
         )
     else:
         # Credit the account with borrowed funds
         tx = Transaction(
             household_id=h.id,
             account_id=account.id,
-            member_id=payload.member_id,
+            member_id=payload.member_id or account.member_id,
             loan_id=ln.id,
             transaction_type=TransactionType.income,
             direction="in",
             amount=payload.principal_amount,
             description=f"Loan received from {payload.person_name} ({payload.description or 'Borrowed'})",
-            transaction_date=datetime.now(timezone.utc)
+            transaction_date=target_date
         )
     db.add(tx)
     db.add(AuditLog(household_id=h.id, actor_user_id=user.id, entity_type="loan", entity_id=ln.id, action="create"))
@@ -1404,9 +1420,11 @@ def add_loan(
         account_name=account.name,
         member_id=ln.member_id,
         member_name=member.name if member else None,
+        loan_date=ln.loan_date or ln.created_at,
         due_date=ln.due_date,
         description=ln.description,
-        is_settled=ln.is_settled
+        is_settled=ln.is_settled,
+        created_at=ln.created_at
     )
 
 @router.post("/loans/{loan_id}/repayment", response_model=LoanOut)
@@ -1442,18 +1460,19 @@ def record_loan_repayment(
 
     # 2. REQUIREMENT:
     # "suppose returned then credited to prabodh or family member as per choice"
+    repay_date = payload.repayment_date or datetime.now(timezone.utc)
     if ln.loan_type == "lent":
         # Money returned by debtor -> Credit chosen account
         tx = Transaction(
             household_id=h.id,
             account_id=target_acc.id,
-            member_id=payload.member_id,
+            member_id=payload.member_id or target_acc.member_id,
             loan_id=ln.id,
             transaction_type=TransactionType.income,
             direction="in",
             amount=payload.amount,
             description=f"Loan repayment received from {ln.person_name} ({payload.notes or 'Repayment'})",
-            transaction_date=datetime.now(timezone.utc)
+            transaction_date=repay_date
         )
         db.add(tx)
     else:
@@ -1467,13 +1486,13 @@ def record_loan_repayment(
         tx = Transaction(
             household_id=h.id,
             account_id=target_acc.id,
-            member_id=payload.member_id,
+            member_id=payload.member_id or target_acc.member_id,
             loan_id=ln.id,
             transaction_type=TransactionType.expense,
             direction="out",
             amount=payload.amount,
             description=f"Repayment made for loan from {ln.person_name} ({payload.notes or 'Repayment'})",
-            transaction_date=datetime.now(timezone.utc)
+            transaction_date=repay_date
         )
         db.add(tx)
 
@@ -1493,9 +1512,11 @@ def record_loan_repayment(
         account_name=ln.account.name if ln.account else None,
         member_id=payload.member_id or ln.member_id,
         member_name=member.name if member else (ln.member.name if ln.member else None),
+        loan_date=ln.loan_date or ln.created_at,
         due_date=ln.due_date,
         description=ln.description,
-        is_settled=ln.is_settled
+        is_settled=ln.is_settled,
+        created_at=ln.created_at
     )
 
 @router.delete("/loans/{loan_id}", status_code=204)

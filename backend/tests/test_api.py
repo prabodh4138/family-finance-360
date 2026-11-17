@@ -383,3 +383,105 @@ def test_mandatory_password_change_and_opening_balance_update():
     assert login_after_reset.status_code == 200
     assert login_after_reset.json()["must_change_password"] is True
 
+
+def test_family_transfer_and_loan_calendar_date():
+    admin_email = f"admin_tf_{uuid.uuid4().hex[:6]}@family.org"
+    reg = client.post("/api/v1/auth/register", json={
+        "email": admin_email,
+        "full_name": "Prabodh Family Admin",
+        "password": "AdminPassword123!",
+        "household_name": "Rana Family"
+    })
+    assert reg.status_code == 201
+    admin_token = reg.json()["access_token"]
+    admin_headers = {"Authorization": f"Bearer {admin_token}"}
+
+    # 1. Add Family Members: Prabodh (Self created) & Sanjukta
+    sanjukta_res = client.post("/api/v1/members", headers=admin_headers, json={
+        "name": "Sanjukta",
+        "relationship_label": "Wife",
+        "email": f"sanjukta_{uuid.uuid4().hex[:6]}@family.org",
+        "role": "member",
+        "initial_password": "SecurePassword123!"
+    })
+    assert sanjukta_res.status_code == 201
+    sanjukta_id = sanjukta_res.json()["id"]
+
+    # 2. Get Prabodh's Bank Account & Sanjukta's Bank Account
+    accounts = client.get("/api/v1/accounts", headers=admin_headers).json()
+    prabodh_bank = next(a for a in accounts if "Bank" in a["name"])
+
+    # Give Prabodh Bank opening balance 50,000
+    client.put(f"/api/v1/accounts/{prabodh_bank['id']}", headers=admin_headers, json={
+        "opening_balance": "50000.00"
+    })
+
+    # Create Sanjukta SBI Account with 0.00 opening balance
+    sanjukta_acc_res = client.post("/api/v1/accounts", headers=admin_headers, json={
+        "name": "Sanjukta SBI 7378",
+        "account_type": "bank",
+        "opening_balance": "0.00",
+        "member_id": sanjukta_id
+    })
+    assert sanjukta_acc_res.status_code == 201
+    sanjukta_acc_id = sanjukta_acc_res.json()["id"]
+
+    # 3. Fund transfer from Prabodh's Bank to Sanjukta's SBI (within family members)
+    tf_res = client.post("/api/v1/accounts/transfer", headers=admin_headers, json={
+        "from_account_id": prabodh_bank["id"],
+        "to_account_id": sanjukta_acc_id,
+        "amount": "15000.00",
+        "description": "Monthly family allowance to Sanjukta",
+        "transaction_date": datetime.now(timezone.utc).isoformat()
+    })
+    assert tf_res.status_code == 201
+    assert Decimal(str(tf_res.json()["from_account_balance"])) == Decimal("35000.00")
+    assert Decimal(str(tf_res.json()["to_account_balance"])) == Decimal("15000.00")
+
+    # Verify transactions show member linkage
+    txs = client.get(f"/api/v1/transactions?account_id={sanjukta_acc_id}", headers=admin_headers).json()
+    assert len(txs) == 1
+    assert txs[0]["member_id"] == sanjukta_id
+    assert txs[0]["direction"] == "in"
+
+    # 4. Create Loan with an explicit calendar date (e.g., 2026-11-10)
+    loan_date_str = "2026-11-10T10:00:00Z"
+    loan_res = client.post("/api/v1/loans", headers=admin_headers, json={
+        "person_name": "Avimanyu",
+        "loan_type": "lent",
+        "principal_amount": "10000.00",
+        "account_id": prabodh_bank["id"],
+        "member_id": None,
+        "loan_date": loan_date_str,
+        "description": "Emergency medical loan"
+    })
+    assert loan_res.status_code == 201
+    loan_data = loan_res.json()
+    assert "2026-11-10" in loan_data["loan_date"]
+    assert Decimal(str(loan_data["principal_amount"])) == Decimal("10000.00")
+    assert Decimal(str(loan_data["remaining_amount"])) == Decimal("10000.00")
+
+    # Check that loans list returns the loan_date
+    all_loans = client.get("/api/v1/loans", headers=admin_headers).json()
+    matching_loan = next(l for l in all_loans if l["id"] == loan_data["id"])
+    assert "2026-11-10" in matching_loan["loan_date"]
+
+    # 5. Loan Repayment with repayment date (e.g., 2026-11-15) credited to Sanjukta SBI
+    repay_date_str = "2026-11-15T15:30:00Z"
+    repay_res = client.post(f"/api/v1/loans/{loan_data['id']}/repayment", headers=admin_headers, json={
+        "amount": "4000.00",
+        "account_id": sanjukta_acc_id,
+        "member_id": sanjukta_id,
+        "repayment_date": repay_date_str,
+        "notes": "Part 1 repayment from Avimanyu"
+    })
+    assert repay_res.status_code == 200
+    assert Decimal(str(repay_res.json()["repaid_amount"])) == Decimal("4000.00")
+    assert Decimal(str(repay_res.json()["remaining_amount"])) == Decimal("6000.00")
+
+    # Sanjukta SBI balance should now be 15,000 + 4,000 = 19,000
+    sanjukta_acc_check = client.get("/api/v1/accounts", headers=admin_headers).json()
+    sanjukta_updated = next(a for a in sanjukta_acc_check if a["id"] == sanjukta_acc_id)
+    assert Decimal(str(sanjukta_updated["current_balance"])) == Decimal("19000.00")
+
+

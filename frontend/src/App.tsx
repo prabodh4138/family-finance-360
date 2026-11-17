@@ -158,10 +158,13 @@ export default function App() {
   const [loanPrincipal, setLoanPrincipal] = useState('');
   const [loanAccount, setLoanAccount] = useState('');
   const [loanMember, setLoanMember] = useState('');
+  const [loanDate, setLoanDate] = useState(new Date().toISOString().slice(0, 10));
+  const [loanDueDate, setLoanDueDate] = useState('');
   const [loanDesc, setLoanDesc] = useState('');
   const [loanRepayAmount, setLoanRepayAmount] = useState('');
   const [loanRepayAccount, setLoanRepayAccount] = useState('');
   const [loanRepayMember, setLoanRepayMember] = useState('');
+  const [loanRepayDate, setLoanRepayDate] = useState(new Date().toISOString().slice(0, 10));
   const [loanRepayNotes, setLoanRepayNotes] = useState('');
 
   // Status
@@ -353,11 +356,31 @@ export default function App() {
     }
   }
 
-  // 2. Fund Transfer between accounts
+  // 2. Fund Transfer between accounts & family members
+  function openTransferModal(fromId?: string, toId?: string) {
+    if (accounts.length < 2) {
+      setError('You need at least 2 accounts to transfer funds. Please add another account first.');
+      return;
+    }
+    const from = fromId && accounts.some(a => a.id === fromId) ? fromId : accounts[0].id;
+    let to = toId && accounts.some(a => a.id === toId) && toId !== from ? toId : '';
+    if (!to) {
+      const other = accounts.find(a => a.id !== from);
+      to = other ? other.id : '';
+    }
+    setTransferFrom(from);
+    setTransferTo(to);
+    setTransferAmount('');
+    setTransferDesc('');
+    setTransferMember('');
+    setTransferDate(new Date().toISOString().slice(0, 16));
+    setModal('transfer');
+  }
+
   async function handleTransfer(e: React.FormEvent) {
     e.preventDefault();
-    if (transferFrom === transferTo) {
-      setError('Source and destination accounts must be different.');
+    if (!transferFrom || !transferTo || transferFrom === transferTo) {
+      setError('Source and destination accounts must be different. Please select two distinct accounts.');
       return;
     }
     const sourceAcc = accounts.find(a => a.id === transferFrom);
@@ -390,7 +413,7 @@ export default function App() {
     }
   }
 
-  // 3. Loan Creation (with Account debit / credit and Member attribution)
+  // 3. Loan Creation (with Account debit / credit, Member attribution, and Date Selection)
   async function saveLoan(e: React.FormEvent) {
     e.preventDefault();
     if (!loanAccount) {
@@ -416,6 +439,8 @@ export default function App() {
         principal_amount: loanPrincipal,
         account_id: loanAccount,
         member_id: loanMember || null,
+        loan_date: loanDate ? new Date(loanDate).toISOString() : undefined,
+        due_date: loanDueDate ? new Date(loanDueDate).toISOString() : undefined,
         description: loanDesc.trim() || undefined,
       });
       const selectedAccObj = accounts.find(a => a.id === loanAccount);
@@ -429,6 +454,8 @@ export default function App() {
       setLoanPerson('');
       setLoanPrincipal('');
       setLoanDesc('');
+      setLoanDueDate('');
+      setLoanDate(new Date().toISOString().slice(0, 10));
       await refresh();
       if (tab === 'Bank Statement') fetchStatement();
     } catch (e) {
@@ -438,7 +465,7 @@ export default function App() {
     }
   }
 
-  // 4. Loan Repayment (Credited to member/account of choice)
+  // 4. Loan Repayment (Credited to member/account of choice with date)
   async function saveLoanRepayment(e: React.FormEvent) {
     e.preventDefault();
     if (!selectedLoan || !loanRepayAccount) return;
@@ -458,6 +485,7 @@ export default function App() {
         amount: loanRepayAmount,
         account_id: loanRepayAccount,
         member_id: loanRepayMember || null,
+        repayment_date: loanRepayDate ? new Date(loanRepayDate).toISOString() : undefined,
         notes: loanRepayNotes.trim() || undefined,
       });
       const accObj = accounts.find(a => a.id === loanRepayAccount);
@@ -471,6 +499,7 @@ export default function App() {
       setSelectedLoan(null);
       setLoanRepayAmount('');
       setLoanRepayNotes('');
+      setLoanRepayDate(new Date().toISOString().slice(0, 10));
       await refresh();
       if (tab === 'Bank Statement') fetchStatement();
     } catch (e) {
@@ -745,12 +774,7 @@ export default function App() {
             <div className="action-group">
               <button
                 className="secondary"
-                onClick={() => {
-                  setTransferAmount('');
-                  setTransferDesc('');
-                  setTransferDate(new Date().toISOString().slice(0, 16));
-                  setModal('transfer');
-                }}
+                onClick={() => openTransferModal()}
               >
                 <ArrowLeftRight size={15} /> Transfer funds
               </button>
@@ -844,12 +868,7 @@ export default function App() {
                   </button>
                   <button
                     className="greeting-btn"
-                    onClick={() => {
-                      setTransferAmount('');
-                      setTransferDesc('');
-                      setTransferDate(new Date().toISOString().slice(0, 16));
-                      setModal('transfer');
-                    }}
+                    onClick={() => openTransferModal()}
                   >
                     <ArrowLeftRight size={14} /> Quick Transfer
                   </button>
@@ -888,12 +907,7 @@ export default function App() {
                 <div className="action-group">
                   <button
                     className="secondary"
-                    onClick={() => {
-                      setTransferAmount('');
-                      setTransferDesc('');
-                      setTransferDate(new Date().toISOString().slice(0, 16));
-                      setModal('transfer');
-                    }}
+                    onClick={() => openTransferModal()}
                   >
                     <ArrowLeftRight size={14} /> Transfer Funds
                   </button>
@@ -1420,12 +1434,7 @@ export default function App() {
                 <div className="action-group">
                   <button
                     className="secondary"
-                    onClick={() => {
-                      setTransferAmount('');
-                      setTransferDesc('');
-                      setTransferDate(new Date().toISOString().slice(0, 16));
-                      setModal('transfer');
-                    }}
+                    onClick={() => openTransferModal()}
                   >
                     <ArrowLeftRight size={14} /> Transfer funds
                   </button>
@@ -1480,11 +1489,7 @@ export default function App() {
                         <button
                           className="secondary btn-sm"
                           style={{ flex: 1 }}
-                          onClick={() => {
-                            setTransferFrom(acc.id);
-                            setTransferAmount('');
-                            setModal('transfer');
-                          }}
+                          onClick={() => openTransferModal(acc.id)}
                         >
                           <ArrowLeftRight size={13} style={{ display: 'inline', marginRight: 4 }} /> Transfer
                         </button>
@@ -1534,10 +1539,100 @@ export default function App() {
                       When lending (e.g. Prabodh lends to Avimanyu), the account is debited. When returned, funds are credited to the family member and account of your choice.
                     </p>
                   </div>
-                  <button className="primary" onClick={() => { setLoanPerson(''); setLoanPrincipal(''); setLoanDesc(''); setModal('loan'); }}>
+                  <button className="primary" onClick={() => { setLoanPerson(''); setLoanPrincipal(''); setLoanDesc(''); setLoanDate(new Date().toISOString().slice(0, 10)); setLoanDueDate(''); setModal('loan'); }}>
                     <Plus size={16} /> Record loan
                   </button>
                 </div>
+
+                {/* LOANS LEDGER TABLE WITH DEDICATED DATE COLUMN */}
+                {loans.length > 0 && (
+                  <div className="table-responsive" style={{ marginTop: 12, marginBottom: 20 }}>
+                    <table className="data-table">
+                      <thead>
+                        <tr>
+                          <th>📅 Loan Date</th>
+                          <th>Person / Entity</th>
+                          <th>Type</th>
+                          <th>Family Member</th>
+                          <th>Account</th>
+                          <th className="right">Principal</th>
+                          <th className="right">Repaid</th>
+                          <th className="right">Remaining</th>
+                          <th>Due Date</th>
+                          <th className="right">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {loans.map(l => (
+                          <tr key={l.id}>
+                            <td>
+                              <b style={{ color: '#0f172a' }}>
+                                {l.loan_date
+                                  ? new Date(l.loan_date).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })
+                                  : l.created_at
+                                  ? new Date(l.created_at).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })
+                                  : '—'}
+                              </b>
+                            </td>
+                            <td>
+                              <div>
+                                <b>{l.person_name}</b>
+                                {l.description && <div style={{ fontSize: 11, color: '#64748b' }}>{l.description}</div>}
+                              </div>
+                            </td>
+                            <td>
+                              <span className={`badge ${l.is_settled ? 'badge-green' : l.loan_type === 'lent' ? 'badge-amber' : 'badge-rose'}`}>
+                                {l.loan_type === 'lent' ? 'Money Lent (Given)' : 'Money Borrowed (Taken)'}
+                              </span>
+                            </td>
+                            <td><span className="member-pill">{l.member_name || 'Household'}</span></td>
+                            <td><small>{l.account_name || 'Account'}</small></td>
+                            <td className="right amount">{money(l.principal_amount)}</td>
+                            <td className="right amount positive">{money(l.repaid_amount)}</td>
+                            <td className="right amount" style={{ fontWeight: 700, color: l.is_settled ? '#166534' : '#b91c1c' }}>
+                              {money(l.remaining_amount)}
+                            </td>
+                            <td>
+                              {l.due_date ? new Date(l.due_date).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : '—'}
+                            </td>
+                            <td className="right">
+                              <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end', alignItems: 'center' }}>
+                                {!l.is_settled ? (
+                                  <button
+                                    className="secondary btn-sm"
+                                    onClick={() => {
+                                      setSelectedLoan(l);
+                                      setLoanRepayAmount(String(l.remaining_amount));
+                                      setLoanRepayDate(new Date().toISOString().slice(0, 10));
+                                      setModal('loan_repay');
+                                    }}
+                                    style={{ fontSize: 11, padding: '3px 8px' }}
+                                  >
+                                    Repay
+                                  </button>
+                                ) : (
+                                  <span className="badge badge-green" style={{ fontSize: 10 }}>Settled</span>
+                                )}
+                                <button
+                                  className="btn-icon danger"
+                                  onClick={async () => {
+                                    if (!window.confirm(`Delete loan record for ${l.person_name}?`)) return;
+                                    await api.deleteLoan(l.id);
+                                    notifySuccess('Loan record deleted.');
+                                    await refresh();
+                                  }}
+                                  title="Delete loan"
+                                >
+                                  <Trash2 size={13} />
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
 
                 <div className="card-grid">
                   {loans.map(l => (
@@ -1555,6 +1650,16 @@ export default function App() {
                         </span>
                       </div>
                       <div>
+                        <div className="card-stats">
+                          <span>📅 Loan Date</span>
+                          <b>
+                            {l.loan_date
+                              ? new Date(l.loan_date).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })
+                              : l.created_at
+                              ? new Date(l.created_at).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })
+                              : '—'}
+                          </b>
+                        </div>
                         <div className="card-stats">
                           <span>Principal</span>
                           <b>{money(l.principal_amount)}</b>
@@ -2248,27 +2353,57 @@ export default function App() {
             {/* Modal: Transfer Funds */}
             {modal === 'transfer' && (
               <form className="form-stack" onSubmit={handleTransfer}>
+                <div style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 8, padding: '10px 14px', fontSize: 12, color: '#166534', lineHeight: 1.5, margin: '0 0 10px' }}>
+                  💡 <b>Fund Transfer:</b> Move funds instantly between any bank, cash, or wallet accounts across family members with automatic balance validation.
+                </div>
+
                 <label>
-                  From Account (Source)
-                  <select required value={transferFrom} onChange={e => setTransferFrom(e.target.value)}>
+                  From Account (Source Account — Balance Debited)
+                  <select
+                    required
+                    value={transferFrom}
+                    onChange={e => {
+                      const newFrom = e.target.value;
+                      setTransferFrom(newFrom);
+                      if (newFrom === transferTo) {
+                        const nextOther = accounts.find(a => a.id !== newFrom);
+                        if (nextOther) setTransferTo(nextOther.id);
+                      }
+                    }}
+                  >
                     {accounts.map(a => (
                       <option key={a.id} value={a.id}>
-                        {a.name} — Available: {money(a.current_balance)}
+                        {a.name} · {a.member_name ? `Owner: ${a.member_name}` : 'Shared/Joint'} — Available: {money(a.current_balance)}
                       </option>
                     ))}
                   </select>
                 </label>
 
                 <label>
-                  To Account (Destination)
-                  <select required value={transferTo} onChange={e => setTransferTo(e.target.value)}>
+                  To Account (Destination Account — Balance Credited)
+                  <select
+                    required
+                    value={transferTo}
+                    onChange={e => setTransferTo(e.target.value)}
+                  >
                     {accounts.filter(a => a.id !== transferFrom).map(a => (
                       <option key={a.id} value={a.id}>
-                        {a.name} ({money(a.current_balance)})
+                        {a.name} · {a.member_name ? `Owner: ${a.member_name}` : 'Shared/Joint'} (Balance: {money(a.current_balance)})
                       </option>
                     ))}
                   </select>
                 </label>
+
+                {/* Transfer summary route badge */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', background: '#f8fafc', borderRadius: 6, fontSize: 12, border: '1px dashed #cbd5e1' }}>
+                  <span style={{ fontWeight: 600, color: '#334155' }}>
+                    {accounts.find(a => a.id === transferFrom)?.name || 'Source'} ({accounts.find(a => a.id === transferFrom)?.member_name || 'Family'})
+                  </span>
+                  <span style={{ color: '#0ea5e9', fontWeight: 'bold' }}>➔</span>
+                  <span style={{ fontWeight: 600, color: '#047857' }}>
+                    {accounts.find(a => a.id === transferTo)?.name || 'Destination'} ({accounts.find(a => a.id === transferTo)?.member_name || 'Family'})
+                  </span>
+                </div>
 
                 <label>
                   Transfer Amount (₹)
@@ -2282,7 +2417,7 @@ export default function App() {
                     placeholder="0.00"
                   />
                   <small style={{ color: '#74867b' }}>
-                    Available in source: {money(accounts.find(a => a.id === transferFrom)?.current_balance || 0)}
+                    Available in source account: {money(accounts.find(a => a.id === transferFrom)?.current_balance || 0)}
                   </small>
                 </label>
 
@@ -2292,15 +2427,19 @@ export default function App() {
                     required
                     value={transferDesc}
                     onChange={e => setTransferDesc(e.target.value)}
-                    placeholder="e.g. ATM cash withdrawal, Move funds to Savings"
+                    placeholder="e.g. Sent monthly allowance to Sanjukta, Cash withdrawal"
                   />
                 </label>
 
                 <label>
-                  Family Member (Optional)
+                  Family Member Initiating / Associated (Optional)
                   <select value={transferMember} onChange={e => setTransferMember(e.target.value)}>
                     <option value="">Household / Shared</option>
-                    {members.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
+                    {members.map(m => (
+                      <option key={m.id} value={m.id}>
+                        {m.name} ({m.relationship_label})
+                      </option>
+                    ))}
                   </select>
                 </label>
 
@@ -2314,7 +2453,7 @@ export default function App() {
                   />
                 </label>
 
-                <button className="primary full" disabled={busy}>
+                <button className="primary full" disabled={busy || !transferFrom || !transferTo || transferFrom === transferTo}>
                   {busy ? 'Transferring…' : 'Execute fund transfer'}
                 </button>
               </form>
@@ -2343,11 +2482,21 @@ export default function App() {
                 </label>
 
                 <label>
+                  📅 Loan Date (When loan was given / taken)
+                  <input
+                    type="date"
+                    required
+                    value={loanDate}
+                    onChange={e => setLoanDate(e.target.value)}
+                  />
+                </label>
+
+                <label>
                   Account {loanType === 'lent' ? 'to Debit' : 'to Credit'}
                   <select required value={loanAccount} onChange={e => setLoanAccount(e.target.value)}>
                     {accounts.map(a => (
                       <option key={a.id} value={a.id}>
-                        {a.name} — Available: {money(a.current_balance)}
+                        {a.name} · {a.member_name ? `Owner: ${a.member_name}` : 'Shared/Joint'} — Available: {money(a.current_balance)}
                       </option>
                     ))}
                   </select>
@@ -2356,7 +2505,11 @@ export default function App() {
                 <label>
                   Family Member (Who {loanType === 'lent' ? 'gives' : 'takes'} the loan)
                   <select value={loanMember} onChange={e => setLoanMember(e.target.value)}>
-                    {members.map(m => <option key={m.id} value={m.id}>{m.name} ({m.relationship_label})</option>)}
+                    {members.map(m => (
+                      <option key={m.id} value={m.id}>
+                        {m.name} ({m.relationship_label})
+                      </option>
+                    ))}
                   </select>
                 </label>
 
@@ -2379,6 +2532,15 @@ export default function App() {
                 </label>
 
                 <label>
+                  Expected Due Date / Return Date (Optional)
+                  <input
+                    type="date"
+                    value={loanDueDate}
+                    onChange={e => setLoanDueDate(e.target.value)}
+                  />
+                </label>
+
+                <label>
                   Purpose / Notes
                   <input value={loanDesc} onChange={e => setLoanDesc(e.target.value)} placeholder="e.g. Emergency loan to friend" />
                 </label>
@@ -2395,6 +2557,16 @@ export default function App() {
                 <p className="muted" style={{ margin: 0 }}>
                   Outstanding remaining balance: <b>{money(selectedLoan?.remaining_amount || 0)}</b>
                 </p>
+
+                <label>
+                  📅 Repayment Date
+                  <input
+                    type="date"
+                    required
+                    value={loanRepayDate}
+                    onChange={e => setLoanRepayDate(e.target.value)}
+                  />
+                </label>
 
                 <label>
                   Repayment Amount (₹)
@@ -2415,7 +2587,7 @@ export default function App() {
                   <select required value={loanRepayAccount} onChange={e => setLoanRepayAccount(e.target.value)}>
                     {accounts.map(a => (
                       <option key={a.id} value={a.id}>
-                        {a.name} — Available: {money(a.current_balance)}
+                        {a.name} · {a.member_name ? `Owner: ${a.member_name}` : 'Shared/Joint'} — Available: {money(a.current_balance)}
                       </option>
                     ))}
                   </select>

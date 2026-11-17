@@ -175,9 +175,11 @@ export interface Loan {
   account_name?: string | null;
   member_id?: string | null;
   member_name?: string | null;
+  loan_date?: string | null;
   due_date?: string | null;
   description?: string | null;
   is_settled: boolean;
+  created_at?: string | null;
 }
 
 export interface StatementEntry {
@@ -343,10 +345,11 @@ export const api = {
     principal_amount: string | number;
     account_id: string;
     member_id?: string | null;
+    loan_date?: string;
     description?: string;
     due_date?: string;
   }) => request<Loan>('/loans', { method: 'POST', body: JSON.stringify(payload) }),
-  recordLoanRepayment: (id: string, payload: { amount: string | number; account_id: string; member_id?: string | null; notes?: string }) =>
+  recordLoanRepayment: (id: string, payload: { amount: string | number; account_id: string; member_id?: string | null; repayment_date?: string; notes?: string }) =>
     request<Loan>(`/loans/${id}/repayment`, { method: 'POST', body: JSON.stringify(payload) }),
   deleteLoan: (id: string) => request<void>(`/loans/${id}`, { method: 'DELETE' }),
 };

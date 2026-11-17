@@ -144,6 +144,7 @@ class Loan(Base):
     member_id: Mapped[str | None] = mapped_column(ForeignKey("family_members.id", ondelete="SET NULL"), nullable=True)
     account_id: Mapped[str | None] = mapped_column(ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True)
     is_settled: Mapped[bool] = mapped_column(Boolean, default=False)
+    loan_date: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     member: Mapped[FamilyMember | None] = relationship(foreign_keys=[member_id])
