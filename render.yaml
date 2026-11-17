@@ -1,0 +1,53 @@
+# Render Infrastructure as Code Blueprint
+# https://render.com/docs/blueprint-spec
+
+services:
+  # -------------------------------------------------------------
+  # 1. Backend Web Service (FastAPI + Neon PostgreSQL)
+  # -------------------------------------------------------------
+  - type: web
+    name: family-finance-360-backend
+    runtime: python
+    plan: free
+    region: oregon
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt && alembic upgrade head
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: APP_NAME
+        value: Family Finance 360
+      - key: API_PREFIX
+        value: /api/v1
+      - key: DATABASE_URL
+        sync: false
+        # Paste your Neon connection string in the Render Dashboard
+      - key: JWT_SECRET_KEY
+        generateValue: true
+      - key: ACCESS_TOKEN_EXPIRE_MINUTES
+        value: 10080 # 7 days for convenient family use
+      - key: CORS_ORIGINS
+        value: http://localhost:5173,https://family-finance-360-frontend.onrender.com
+
+  # -------------------------------------------------------------
+  # 2. Frontend Static Site (React + Vite PWA)
+  # -------------------------------------------------------------
+  - type: static
+    name: family-finance-360-frontend
+    plan: free
+    region: oregon
+    rootDir: frontend
+    buildCommand: npm install && npm run build
+    staticPublishPath: dist
+    autoDeploy: true
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    envVars:
+      - key: VITE_API_BASE_URL
+        sync: false
+        # Set to: https://family-finance-360-backend.onrender.com/api/v1
