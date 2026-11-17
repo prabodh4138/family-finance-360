@@ -12,17 +12,19 @@ from app.models.entities import (
     Category, Budget, SavingsGoal, Loan, TransactionType
 )
 from app.schemas.api import (
-    RegisterIn, LoginIn, TokenOut, MemberIn, MemberOut,
-    AccountIn, AccountOut, TransferIn, TransferOut,
+    RegisterIn, LoginIn, TokenOut, UserMeOut,
+    MemberIn, MemberOut, MemberUpdateIn, MemberPasswordResetIn,
+    AccountIn, AccountOut, AccountUpdateIn, TransferIn, TransferOut,
     CategoryIn, CategoryOut,
     TransactionIn, TransactionUpdateIn, TransactionOut,
-    DashboardOut, CategoryBreakdown, MonthlyTrend,
+    DashboardOut, MemberBalanceOut, CategoryBreakdown, MonthlyTrend,
     BudgetIn, BudgetOut,
     SavingsGoalIn, SavingsGoalOut, SavingsGoalContributeIn,
     LoanIn, LoanOut, LoanRepaymentIn,
-    AccountStatementOut, StatementEntryOut
+    AccountStatementOut, StatementEntryOut,
+    HouseholdUpdateIn, AuditLogOut
 )
-from app.api.deps import current_user, current_household
+from app.api.deps import current_user, current_household, require_admin
 
 router = APIRouter()
 
@@ -98,23 +100,72 @@ def compute_account_balance(account: Account, household_id: str, db: Session, up
 
 @router.post("/auth/register", response_model=TokenOut, status_code=201)
 def register(payload: RegisterIn, db: Session = Depends(get_db)):
-    email = payload.email.lower()
+    email = payload.email.lower().strip()
     if db.query(User).filter(func.lower(User.email) == email).first():
-        raise HTTPException(status_code=409, detail="Email already registered")
-    user = User(email=email, full_name=payload.full_name, password_hash=hash_password(payload.password))
+        raise HTTPException(status_code=409, detail="Email already registered. Please sign in.")
+
+    # Check if a Family Admin invited this email
+    invited_member = db.query(FamilyMember).filter(func.lower(FamilyMember.email) == email).first()
+
+    if invited_member:
+        # Joining an existing household that invited this email!
+        user = User(
+            email=email,
+            full_name=payload.full_name or invited_member.name,
+            password_hash=hash_password(payload.password),
+            role=invited_member.role or "member",
+            household_id=invited_member.household_id
+        )
+        db.add(user)
+        db.flush()
+        invited_member.user_id = user.id
+        db.commit()
+        return TokenOut(access_token=create_access_token(user.id))
+
+    # If not invited: Registering a brand new household as Admin
+    user = User(
+        email=email,
+        full_name=payload.full_name,
+        password_hash=hash_password(payload.password),
+        role="admin"
+    )
     db.add(user)
     db.flush()
 
-    household = Household(owner_id=user.id, name=payload.household_name, currency="INR")
+    household_name = payload.household_name or f"{payload.full_name}'s Family"
+    household = Household(owner_id=user.id, name=household_name, currency="INR")
     db.add(household)
     db.flush()
 
-    # Default Cash and Bank accounts
-    db.add(Account(household_id=household.id, name="Cash in Hand", account_type="cash", opening_balance=Decimal("0.00")))
-    db.add(Account(household_id=household.id, name="Primary Bank Account", account_type="bank", opening_balance=Decimal("0.00")))
+    user.household_id = household.id
 
-    # Default self family member
-    db.add(FamilyMember(household_id=household.id, name=payload.full_name, relationship_label="Self"))
+    # Create self family member
+    self_member = FamilyMember(
+        household_id=household.id,
+        user_id=user.id,
+        name=payload.full_name,
+        email=email,
+        role="admin",
+        relationship_label="Self"
+    )
+    db.add(self_member)
+    db.flush()
+
+    # Default Cash and Bank accounts assigned to self_member
+    db.add(Account(
+        household_id=household.id,
+        member_id=self_member.id,
+        name="Cash in Hand",
+        account_type="cash",
+        opening_balance=Decimal("0.00")
+    ))
+    db.add(Account(
+        household_id=household.id,
+        member_id=self_member.id,
+        name="Primary Bank Account",
+        account_type="bank",
+        opening_balance=Decimal("0.00")
+    ))
 
     # Seed default categories
     for name, tx_type in DEFAULT_CATEGORIES:
@@ -125,23 +176,27 @@ def register(payload: RegisterIn, db: Session = Depends(get_db)):
 
 @router.post("/auth/login", response_model=TokenOut)
 def login(payload: LoginIn, db: Session = Depends(get_db)):
-    user = db.query(User).filter(func.lower(User.email) == payload.email.lower()).first()
+    user = db.query(User).filter(func.lower(User.email) == payload.email.lower().strip()).first()
     if not user or not verify_password(payload.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Incorrect email or password")
     if not user.is_active:
         raise HTTPException(status_code=403, detail="User account is deactivated")
     return TokenOut(access_token=create_access_token(user.id))
 
-@router.get("/auth/me")
-def me(user: User = Depends(current_user), h: Household = Depends(current_household)):
-    return {
-        "id": user.id,
-        "email": user.email,
-        "full_name": user.full_name,
-        "household_id": h.id,
-        "household_name": h.name,
-        "currency": h.currency
-    }
+@router.get("/auth/me", response_model=UserMeOut)
+def me(user: User = Depends(current_user), h: Household = Depends(current_household), db: Session = Depends(get_db)):
+    linked_member = db.query(FamilyMember).filter(FamilyMember.user_id == user.id).first()
+    return UserMeOut(
+        id=user.id,
+        email=user.email,
+        full_name=user.full_name,
+        role=user.role,
+        household_id=h.id,
+        household_name=h.name,
+        currency=h.currency,
+        member_id=linked_member.id if linked_member else None,
+        member_name=linked_member.name if linked_member else user.full_name
+    )
 
 
 # ==========================================
@@ -171,33 +226,244 @@ def add_category(payload: CategoryIn, h: Household = Depends(current_household),
 
 @router.get("/members", response_model=list[MemberOut])
 def list_members(h: Household = Depends(current_household), db: Session = Depends(get_db)):
-    return db.query(FamilyMember).filter(FamilyMember.household_id == h.id).order_by(FamilyMember.name).all()
+    members = db.query(FamilyMember).filter(FamilyMember.household_id == h.id).order_by(FamilyMember.name).all()
+    results = []
+    for m in members:
+        accs = db.query(Account).filter(Account.household_id == h.id, Account.member_id == m.id, Account.is_active.is_(True)).all()
+        tot_bal = sum((compute_account_balance(a, h.id, db) for a in accs), Decimal("0.00"))
+        results.append(MemberOut(
+            id=m.id,
+            name=m.name,
+            relationship_label=m.relationship_label,
+            email=m.email,
+            role=m.role,
+            user_id=m.user_id,
+            can_login=bool(m.user_id or m.email),
+            is_active=m.is_active,
+            account_count=len(accs),
+            total_balance=tot_bal
+        ))
+    return results
 
 @router.post("/members", response_model=MemberOut, status_code=201)
-def add_member(payload: MemberIn, h: Household = Depends(current_household), db: Session = Depends(get_db)):
-    member = FamilyMember(household_id=h.id, **payload.model_dump())
+def add_member(
+    payload: MemberIn,
+    user: User = Depends(current_user),
+    h: Household = Depends(current_household),
+    db: Session = Depends(get_db)
+):
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Only family administrators can add new family members.")
+
+    email_clean = payload.email.lower().strip() if payload.email else None
+    new_user_id = None
+
+    if email_clean:
+        # Check if already in family
+        existing_fm = db.query(FamilyMember).filter(
+            FamilyMember.household_id == h.id,
+            func.lower(FamilyMember.email) == email_clean
+        ).first()
+        if existing_fm:
+            raise HTTPException(status_code=409, detail=f"A family member with email '{email_clean}' is already in this family.")
+
+        # Check if User already exists
+        existing_u = db.query(User).filter(func.lower(User.email) == email_clean).first()
+        if existing_u:
+            if existing_u.household_id and existing_u.household_id != h.id:
+                raise HTTPException(status_code=409, detail=f"Email '{email_clean}' is already registered with another family.")
+            new_user_id = existing_u.id
+        elif payload.initial_password:
+            # Create User record immediately with initial password so they can log in!
+            new_u = User(
+                email=email_clean,
+                full_name=payload.name,
+                password_hash=hash_password(payload.initial_password),
+                role=payload.role,
+                household_id=h.id
+            )
+            db.add(new_u)
+            db.flush()
+            new_user_id = new_u.id
+
+    member = FamilyMember(
+        household_id=h.id,
+        user_id=new_user_id,
+        name=payload.name,
+        email=email_clean,
+        role=payload.role,
+        relationship_label=payload.relationship_label,
+        is_active=True
+    )
     db.add(member)
+    db.flush()
+
+    # Optionally create an initial account for this member
+    if payload.initial_account_name:
+        initial_acc = Account(
+            household_id=h.id,
+            member_id=member.id,
+            name=payload.initial_account_name,
+            account_type=payload.initial_account_type or "bank",
+            opening_balance=payload.initial_account_balance or Decimal("0.00")
+        )
+        db.add(initial_acc)
+
+    # Audit log
+    db.add(AuditLog(
+        household_id=h.id,
+        actor_user_id=user.id,
+        entity_type="member",
+        entity_id=member.id,
+        action="create",
+        details=f"Admin added family member {member.name} ({member.relationship_label}, Role: {member.role}, Email: {member.email})"
+    ))
+
     db.commit()
     db.refresh(member)
-    return member
 
-@router.patch("/members/{member_id}", response_model=MemberOut)
-def edit_member(member_id: str, payload: MemberIn, h: Household = Depends(current_household), db: Session = Depends(get_db)):
+    accs = db.query(Account).filter(Account.household_id == h.id, Account.member_id == member.id, Account.is_active.is_(True)).all()
+    tot_bal = sum((compute_account_balance(a, h.id, db) for a in accs), Decimal("0.00"))
+
+    return MemberOut(
+        id=member.id,
+        name=member.name,
+        relationship_label=member.relationship_label,
+        email=member.email,
+        role=member.role,
+        user_id=member.user_id,
+        can_login=bool(member.user_id or member.email),
+        is_active=member.is_active,
+        account_count=len(accs),
+        total_balance=tot_bal
+    )
+
+@router.put("/members/{member_id}", response_model=MemberOut)
+def update_member(
+    member_id: str,
+    payload: MemberUpdateIn,
+    user: User = Depends(current_user),
+    h: Household = Depends(current_household),
+    db: Session = Depends(get_db)
+):
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Only family administrators can update members.")
+
     member = db.query(FamilyMember).filter(FamilyMember.id == member_id, FamilyMember.household_id == h.id).first()
     if not member:
         raise HTTPException(status_code=404, detail="Family member not found")
-    member.name = payload.name
-    member.relationship_label = payload.relationship_label
+
+    if payload.name is not None:
+        member.name = payload.name
+    if payload.relationship_label is not None:
+        member.relationship_label = payload.relationship_label
+    if payload.role is not None:
+        member.role = payload.role
+        if member.user_id:
+            u = db.get(User, member.user_id)
+            if u:
+                u.role = payload.role
+    if payload.email is not None:
+        email_clean = payload.email.lower().strip()
+        member.email = email_clean
+        if member.user_id:
+            u = db.get(User, member.user_id)
+            if u:
+                u.email = email_clean
+    if payload.is_active is not None:
+        member.is_active = payload.is_active
+        if member.user_id:
+            u = db.get(User, member.user_id)
+            if u:
+                u.is_active = payload.is_active
+
+    db.add(AuditLog(
+        household_id=h.id,
+        actor_user_id=user.id,
+        entity_type="member",
+        entity_id=member.id,
+        action="update",
+        details=f"Admin updated member {member.name}"
+    ))
     db.commit()
     db.refresh(member)
-    return member
+
+    accs = db.query(Account).filter(Account.household_id == h.id, Account.member_id == member.id, Account.is_active.is_(True)).all()
+    tot_bal = sum((compute_account_balance(a, h.id, db) for a in accs), Decimal("0.00"))
+
+    return MemberOut(
+        id=member.id,
+        name=member.name,
+        relationship_label=member.relationship_label,
+        email=member.email,
+        role=member.role,
+        user_id=member.user_id,
+        can_login=bool(member.user_id or member.email),
+        is_active=member.is_active,
+        account_count=len(accs),
+        total_balance=tot_bal
+    )
+
+@router.post("/members/{member_id}/reset-password")
+def reset_member_password(
+    member_id: str,
+    payload: MemberPasswordResetIn,
+    user: User = Depends(require_admin),
+    h: Household = Depends(current_household),
+    db: Session = Depends(get_db)
+):
+    member = db.query(FamilyMember).filter(FamilyMember.id == member_id, FamilyMember.household_id == h.id).first()
+    if not member:
+        raise HTTPException(status_code=404, detail="Family member not found")
+
+    if not member.user_id:
+        if not member.email:
+            raise HTTPException(status_code=422, detail="Member does not have an email address. Please update member with an email first.")
+        new_u = User(
+            email=member.email.lower(),
+            full_name=member.name,
+            password_hash=hash_password(payload.new_password),
+            role=member.role,
+            household_id=h.id
+        )
+        db.add(new_u)
+        db.flush()
+        member.user_id = new_u.id
+    else:
+        target_user = db.get(User, member.user_id)
+        if not target_user:
+            raise HTTPException(status_code=404, detail="User account not found")
+        target_user.password_hash = hash_password(payload.new_password)
+
+    db.add(AuditLog(
+        household_id=h.id,
+        actor_user_id=user.id,
+        entity_type="member",
+        entity_id=member.id,
+        action="reset_password",
+        details=f"Admin reset password for member {member.name}"
+    ))
+    db.commit()
+    return {"message": f"Password successfully updated for {member.name}. They can now log in using {member.email}."}
 
 @router.delete("/members/{member_id}", status_code=204)
-def deactivate_member(member_id: str, h: Household = Depends(current_household), db: Session = Depends(get_db)):
+def deactivate_member(member_id: str, user: User = Depends(require_admin), h: Household = Depends(current_household), db: Session = Depends(get_db)):
     member = db.query(FamilyMember).filter(FamilyMember.id == member_id, FamilyMember.household_id == h.id).first()
     if not member:
         raise HTTPException(status_code=404, detail="Family member not found")
     member.is_active = False
+    if member.user_id:
+        u = db.get(User, member.user_id)
+        if u:
+            u.is_active = False
+    db.add(AuditLog(
+        household_id=h.id,
+        actor_user_id=user.id,
+        entity_type="member",
+        entity_id=member.id,
+        action="deactivate",
+        details=f"Admin deactivated member {member.name}"
+    ))
     db.commit()
 
 
@@ -211,30 +477,126 @@ def list_accounts(h: Household = Depends(current_household), db: Session = Depen
     results = []
     for acc in accounts:
         balance = compute_account_balance(acc, h.id, db)
+        member_name = acc.member.name if acc.member else "Joint / Family"
         results.append(AccountOut(
             id=acc.id,
             name=acc.name,
             account_type=acc.account_type,
             opening_balance=acc.opening_balance,
             current_balance=balance,
+            member_id=acc.member_id,
+            member_name=member_name,
             is_active=acc.is_active
         ))
     return results
 
 @router.post("/accounts", response_model=AccountOut, status_code=201)
-def add_account(payload: AccountIn, h: Household = Depends(current_household), db: Session = Depends(get_db)):
-    account = Account(household_id=h.id, **payload.model_dump())
+def add_account(payload: AccountIn, user: User = Depends(current_user), h: Household = Depends(current_household), db: Session = Depends(get_db)):
+    member_id = payload.member_id
+    if member_id:
+        member = db.query(FamilyMember).filter(FamilyMember.id == member_id, FamilyMember.household_id == h.id).first()
+        if not member:
+            raise HTTPException(status_code=404, detail="Selected family member not found")
+
+    account = Account(
+        household_id=h.id,
+        name=payload.name,
+        account_type=payload.account_type,
+        opening_balance=payload.opening_balance,
+        member_id=member_id
+    )
     db.add(account)
     db.commit()
     db.refresh(account)
+
+    member_name = account.member.name if account.member else "Joint / Family"
     return AccountOut(
         id=account.id,
         name=account.name,
         account_type=account.account_type,
         opening_balance=account.opening_balance,
         current_balance=account.opening_balance,
+        member_id=account.member_id,
+        member_name=member_name,
         is_active=account.is_active
     )
+
+@router.put("/accounts/{account_id}", response_model=AccountOut)
+def update_account(
+    account_id: str,
+    payload: AccountUpdateIn,
+    user: User = Depends(current_user),
+    h: Household = Depends(current_household),
+    db: Session = Depends(get_db)
+):
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Only family administrators can edit account details.")
+
+    account = db.query(Account).filter(Account.id == account_id, Account.household_id == h.id).first()
+    if not account:
+        raise HTTPException(status_code=404, detail="Account not found")
+
+    if payload.name is not None:
+        account.name = payload.name
+    if payload.account_type is not None:
+        account.account_type = payload.account_type
+    if payload.opening_balance is not None:
+        account.opening_balance = payload.opening_balance
+    if payload.member_id is not None:
+        if payload.member_id == "":
+            account.member_id = None
+        else:
+            m = db.query(FamilyMember).filter(FamilyMember.id == payload.member_id, FamilyMember.household_id == h.id).first()
+            if not m:
+                raise HTTPException(status_code=404, detail="Family member not found")
+            account.member_id = payload.member_id
+    if payload.is_active is not None:
+        account.is_active = payload.is_active
+
+    db.add(AuditLog(
+        household_id=h.id,
+        actor_user_id=user.id,
+        entity_type="account",
+        entity_id=account.id,
+        action="update",
+        details=f"Admin updated account {account.name}"
+    ))
+    db.commit()
+    db.refresh(account)
+
+    bal = compute_account_balance(account, h.id, db)
+    member_name = account.member.name if account.member else "Joint / Family"
+    return AccountOut(
+        id=account.id,
+        name=account.name,
+        account_type=account.account_type,
+        opening_balance=account.opening_balance,
+        current_balance=bal,
+        member_id=account.member_id,
+        member_name=member_name,
+        is_active=account.is_active
+    )
+
+@router.delete("/accounts/{account_id}", status_code=204)
+def deactivate_account(
+    account_id: str,
+    user: User = Depends(require_admin),
+    h: Household = Depends(current_household),
+    db: Session = Depends(get_db)
+):
+    account = db.query(Account).filter(Account.id == account_id, Account.household_id == h.id).first()
+    if not account:
+        raise HTTPException(status_code=404, detail="Account not found")
+    account.is_active = False
+    db.add(AuditLog(
+        household_id=h.id,
+        actor_user_id=user.id,
+        entity_type="account",
+        entity_id=account.id,
+        action="deactivate",
+        details=f"Admin deactivated account {account.name}"
+    ))
+    db.commit()
 
 @router.post("/accounts/transfer", response_model=TransferOut, status_code=201)
 def transfer_funds(
@@ -758,7 +1120,60 @@ def dashboard_summary(
         ) for k, v in sorted(months_map.items())[-6:]
     ]
 
+    # Combined Balance & Individual Member Balances
+    accounts = db.query(Account).filter(Account.household_id == h.id, Account.is_active.is_(True)).all()
+    account_outs: list[AccountOut] = []
+    combined_balance = Decimal("0.00")
+
+    for acc in accounts:
+        bal = compute_account_balance(acc, h.id, db)
+        combined_balance += bal
+        m_name = acc.member.name if acc.member else "Joint / Family"
+        account_outs.append(AccountOut(
+            id=acc.id,
+            name=acc.name,
+            account_type=acc.account_type,
+            opening_balance=acc.opening_balance,
+            current_balance=bal,
+            member_id=acc.member_id,
+            member_name=m_name,
+            is_active=acc.is_active
+        ))
+
+    members = db.query(FamilyMember).filter(FamilyMember.household_id == h.id, FamilyMember.is_active.is_(True)).order_by(FamilyMember.name).all()
+    member_balances: list[MemberBalanceOut] = []
+
+    for m in members:
+        m_accs = [a for a in account_outs if a.member_id == m.id]
+        m_total = sum((a.current_balance for a in m_accs), Decimal("0.00"))
+        member_balances.append(MemberBalanceOut(
+            member_id=m.id,
+            member_name=m.name,
+            relationship_label=m.relationship_label,
+            role=m.role,
+            email=m.email,
+            total_balance=m_total,
+            account_count=len(m_accs),
+            accounts=m_accs
+        ))
+
+    joint_accs = [a for a in account_outs if a.member_id is None]
+    if joint_accs:
+        j_total = sum((a.current_balance for a in joint_accs), Decimal("0.00"))
+        member_balances.append(MemberBalanceOut(
+            member_id=None,
+            member_name="Joint Family Accounts",
+            relationship_label="Shared",
+            role="member",
+            email=None,
+            total_balance=j_total,
+            account_count=len(joint_accs),
+            accounts=joint_accs
+        ))
+
     return DashboardOut(
+        combined_balance=combined_balance,
+        member_balances=member_balances,
         total_income=income,
         total_expenses=expenses,
         net_savings=income - expenses,
@@ -1064,3 +1479,56 @@ def delete_loan(loan_id: str, h: Household = Depends(current_household), db: Ses
         raise HTTPException(status_code=404, detail="Loan not found")
     db.delete(ln)
     db.commit()
+
+
+# ==========================================
+# ADMIN HOUSEHOLD & AUDIT MANAGEMENT
+# ==========================================
+
+@router.put("/admin/household")
+def update_household(
+    payload: HouseholdUpdateIn,
+    user: User = Depends(require_admin),
+    h: Household = Depends(current_household),
+    db: Session = Depends(get_db)
+):
+    if payload.name:
+        h.name = payload.name
+    if payload.currency:
+        h.currency = payload.currency
+    db.add(AuditLog(
+        household_id=h.id,
+        actor_user_id=user.id,
+        entity_type="household",
+        entity_id=h.id,
+        action="update",
+        details=f"Admin updated household info: Name={h.name}, Currency={h.currency}"
+    ))
+    db.commit()
+    return {"message": "Household settings updated successfully", "name": h.name, "currency": h.currency}
+
+@router.get("/admin/audit-logs", response_model=list[AuditLogOut])
+def get_audit_logs(
+    limit: int = Query(default=50, ge=1, le=200),
+    user: User = Depends(require_admin),
+    h: Household = Depends(current_household),
+    db: Session = Depends(get_db)
+):
+    logs = db.query(AuditLog).filter(AuditLog.household_id == h.id).order_by(AuditLog.created_at.desc()).limit(limit).all()
+    results = []
+    users_cache = {}
+    for log in logs:
+        if log.actor_user_id not in users_cache:
+            u = db.get(User, log.actor_user_id)
+            users_cache[log.actor_user_id] = u.full_name if u else "System"
+        results.append(AuditLogOut(
+            id=log.id,
+            actor_user_id=log.actor_user_id,
+            actor_name=users_cache[log.actor_user_id],
+            entity_type=log.entity_type,
+            entity_id=log.entity_id,
+            action=log.action,
+            details=log.details,
+            created_at=log.created_at
+        ))
+    return results

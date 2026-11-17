@@ -8,7 +8,8 @@ import {
 import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip } from 'recharts';
 import {
   api, type Account, type AccountStatement, type Budget, type Category,
-  type Member, type Loan, type SavingsGoal, type Summary, type Transaction
+  type Member, type Loan, type SavingsGoal, type Summary, type Transaction,
+  type UserMe, type AuditLog
 } from './api';
 
 const money = (value: number | string) =>
@@ -16,9 +17,18 @@ const money = (value: number | string) =>
 
 const palette = ['#2f8f67', '#e5a64b', '#7b8fe8', '#d77d83', '#8854d0', '#20bf6b', '#fa8231', '#4b6584'];
 
+const FINANCIAL_TIPS = [
+  "Tip: Tracking small daily expenses saves up to 15% monthly on family spending!",
+  "Tip: Internal fund transfers between accounts don't count as expenses — keeping your analytics accurate.",
+  "Tip: Admin can add family members with their email so they can sign in and track individual balances.",
+  "Tip: Assigning accounts to specific family members gives transparent individual and combined balances.",
+  "Tip: Setting monthly category budgets alerts you before overspending happens.",
+  "Tip: Repayments on family loans automatically credit the chosen account and family member."
+];
+
 export default function App() {
   const [token, setToken] = useState(localStorage.getItem('ff360_access_token'));
-  const [userProfile, setUserProfile] = useState<{ full_name: string; email: string; household_name: string } | null>(null);
+  const [userProfile, setUserProfile] = useState<UserMe | null>(null);
 
   // Auth form states
   const [email, setEmail] = useState('');
@@ -37,6 +47,9 @@ export default function App() {
   const [budgets, setBudgets] = useState<Budget[]>([]);
   const [savingsGoals, setSavingsGoals] = useState<SavingsGoal[]>([]);
   const [loans, setLoans] = useState<Loan[]>([]);
+
+  // Interactive greeting tip index
+  const [greetingTipIndex, setGreetingTipIndex] = useState(0);
 
   // Bank Statement / Ledger states
   const [statementAccount, setStatementAccount] = useState<string>('');
@@ -62,7 +75,10 @@ export default function App() {
     | 'edit_transaction'
     | 'transfer'
     | 'member'
+    | 'edit_member'
+    | 'reset_password'
     | 'account'
+    | 'edit_account'
     | 'budget'
     | 'goal'
     | 'goal_contribute'
@@ -94,14 +110,33 @@ export default function App() {
   const [transferMember, setTransferMember] = useState('');
   const [transferDate, setTransferDate] = useState(new Date().toISOString().slice(0, 16));
 
-  // Member form states
+  // Member form states (Enhanced for Sign-in & Accounts)
   const [memberName, setMemberName] = useState('');
   const [memberRelation, setMemberRelation] = useState('Other');
+  const [memberEmail, setMemberEmail] = useState('');
+  const [memberRole, setMemberRole] = useState<'admin' | 'member'>('member');
+  const [memberInitialPass, setMemberInitialPass] = useState('');
+  const [memberCreateAcc, setMemberCreateAcc] = useState(false);
+  const [memberInitialAccName, setMemberInitialAccName] = useState('');
+  const [memberInitialAccType, setMemberInitialAccType] = useState('bank');
+  const [memberInitialAccBalance, setMemberInitialAccBalance] = useState('0.00');
 
-  // Account form states
+  // Password Reset for Member
+  const [resetTargetMember, setResetTargetMember] = useState<Member | null>(null);
+  const [resetNewPass, setResetNewPass] = useState('');
+
+  // Account form states (Enhanced with Member ownership)
   const [accName, setAccName] = useState('');
   const [accType, setAccType] = useState('bank');
   const [accOpening, setAccOpening] = useState('0.00');
+  const [accOwnerMember, setAccOwnerMember] = useState('');
+  const [editingAccount, setEditingAccount] = useState<Account | null>(null);
+
+  // Admin household settings & audit logs
+  const [householdEditName, setHouseholdEditName] = useState('');
+  const [householdEditCurrency, setHouseholdEditCurrency] = useState('INR');
+  const [auditLogsList, setAuditLogsList] = useState<AuditLog[]>([]);
+  const [loadingAuditLogs, setLoadingAuditLogs] = useState(false);
 
   // Budget & Goal form states
   const [budgetName, setBudgetName] = useState('');
@@ -171,6 +206,10 @@ export default function App() {
       try {
         const p = await api.me();
         setUserProfile(p);
+        if (p) {
+          setHouseholdEditName(p.household_name);
+          setHouseholdEditCurrency(p.currency);
+        }
       } catch {
         // ignore
       }
@@ -505,6 +544,20 @@ export default function App() {
     [loans]
   );
 
+  const greetingInfo = useMemo(() => {
+    const hour = new Date().getHours();
+    if (hour >= 5 && hour < 12) {
+      return { title: 'Good morning', icon: '🌅', sub: 'Wishing you and your family a bright and prosperous day.' };
+    }
+    if (hour >= 12 && hour < 17) {
+      return { title: 'Good afternoon', icon: '☀️', sub: 'Hope your day is productive. Here is your midday family financial snapshot.' };
+    }
+    if (hour >= 17 && hour < 21) {
+      return { title: 'Good evening', icon: '🌇', sub: 'Review today’s financial movements and family transactions.' };
+    }
+    return { title: 'Good night', icon: '🌙', sub: 'All accounts are balanced and secured. Sleep well!' };
+  }, []);
+
   if (!token) {
     return (
       <main className="auth-shell">
@@ -513,6 +566,17 @@ export default function App() {
           <p className="eyebrow">YOUR HOUSEHOLD, IN BALANCE</p>
           <h1>Family Finance <span>360</span></h1>
           <p className="muted">Mobile-first household ledger, bank statements, fund transfers & loan tracking in INR (₹).</p>
+          
+          {!registerMode ? (
+            <div style={{ background: '#eaf4ee', border: '1px solid #c7e5d2', borderRadius: 8, padding: '9px 12px', fontSize: 11, color: '#1f5b3a', margin: '8px 0 16px', textAlign: 'left', lineHeight: 1.4 }}>
+              💡 <b>Family Member Login:</b> If your Family Admin added your email to the household, enter that email and password to log in.
+            </div>
+          ) : (
+            <div style={{ background: '#fef7e7', border: '1px solid #f6deb3', borderRadius: 8, padding: '9px 12px', fontSize: 11, color: '#7a4e09', margin: '8px 0 16px', textAlign: 'left', lineHeight: 1.4 }}>
+              👑 <b>Admin Registration:</b> Creating a new household workspace. (Invited family members should use "Sign in" instead).
+            </div>
+          )}
+
           <form onSubmit={authenticate} className="form-stack">
             {registerMode && (
               <>
@@ -535,10 +599,10 @@ export default function App() {
               <input
                 type="password"
                 required
-                minLength={registerMode ? 12 : 1}
+                minLength={registerMode ? 6 : 1}
                 value={password}
                 onChange={e => setPassword(e.target.value)}
-                placeholder={registerMode ? 'At least 12 characters' : 'Your password'}
+                placeholder={registerMode ? 'At least 6 characters' : 'Your password'}
               />
             </label>
             {error && <div className="error">{error}</div>}
@@ -547,7 +611,7 @@ export default function App() {
             </button>
           </form>
           <button className="text-button" onClick={() => { setRegisterMode(!registerMode); setError(''); }}>
-            {registerMode ? 'Already registered? Sign in' : 'New here? Create your family account'}
+            {registerMode ? 'Already registered or invited? Sign in' : 'New family setup? Create family account'}
           </button>
           <p className="security-note"><ShieldCheck size={15} /> Argon2id encryption · Neon Cloud PostgreSQL · INR</p>
         </section>
@@ -561,7 +625,10 @@ export default function App() {
     { name: 'Transactions', icon: ReceiptText },
     { name: 'Accounts & Transfers', icon: CreditCard },
     { name: 'Loans & ledger', icon: Activity },
-    { name: 'Family members', icon: Users },
+    ...(userProfile?.role === 'admin'
+      ? [{ name: '👑 Admin Console', icon: ShieldCheck }]
+      : [{ name: 'Family members', icon: Users }]
+    ),
     { name: 'Budgets & goals', icon: Target },
   ];
 
@@ -688,6 +755,219 @@ export default function App() {
           {/* ========================================================= */}
           {tab === 'Overview' && (
             <>
+              {/* INTERACTIVE WISH NOTIFICATION & GREETING HERO */}
+              <div className="greeting-hero">
+                <div className="greeting-top">
+                  <div>
+                    <span className="greeting-time-badge">
+                      {greetingInfo.icon} {greetingInfo.title} · {new Date().toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'short' })}
+                    </span>
+                    <h2 className="greeting-title">
+                      {greetingInfo.title}, {userProfile?.full_name?.split(' ')[0] || 'Family'}!
+                    </h2>
+                    <p className="greeting-sub">{greetingInfo.sub}</p>
+                  </div>
+                  <span className={`role-badge ${userProfile?.role === 'admin' ? 'admin' : 'member'}`} style={{ fontSize: 11, padding: '5px 12px' }}>
+                    {userProfile?.role === 'admin' ? '👑 Family Admin' : '👤 Family Member'}
+                  </span>
+                </div>
+
+                <div
+                  className="greeting-interactive-box"
+                  onClick={() => setGreetingTipIndex((greetingTipIndex + 1) % FINANCIAL_TIPS.length)}
+                  title="Click to see another smart family financial tip"
+                >
+                  <span className="greeting-quote-text">
+                    💡 <b>Daily Tip:</b> {FINANCIAL_TIPS[greetingTipIndex]}
+                  </span>
+                  <span className="greeting-quote-hint">Next Tip ❯</span>
+                </div>
+
+                <div className="greeting-actions">
+                  <button
+                    className="greeting-btn primary-light"
+                    onClick={() => {
+                      setEditingTx(null);
+                      setTxType('expense');
+                      setTxAmount('');
+                      setTxDescription('');
+                      setTxDate(new Date().toISOString().slice(0, 16));
+                      setModal('transaction');
+                    }}
+                  >
+                    <Plus size={14} /> Add Expense
+                  </button>
+                  <button
+                    className="greeting-btn"
+                    onClick={() => {
+                      setEditingTx(null);
+                      setTxType('income');
+                      setTxAmount('');
+                      setTxDescription('');
+                      setTxDate(new Date().toISOString().slice(0, 16));
+                      setModal('transaction');
+                    }}
+                  >
+                    <ArrowDownLeft size={14} /> Add Income
+                  </button>
+                  <button
+                    className="greeting-btn"
+                    onClick={() => {
+                      setTransferAmount('');
+                      setTransferDesc('');
+                      setTransferDate(new Date().toISOString().slice(0, 16));
+                      setModal('transfer');
+                    }}
+                  >
+                    <ArrowLeftRight size={14} /> Quick Transfer
+                  </button>
+                  <button
+                    className="greeting-btn"
+                    onClick={() => setTab('Bank Statement')}
+                  >
+                    <BookOpen size={14} /> Bank Statement
+                  </button>
+                  {userProfile?.role === 'admin' && (
+                    <button
+                      className="greeting-btn"
+                      onClick={() => setTab('👑 Admin Console')}
+                    >
+                      <ShieldCheck size={14} /> Admin Controls
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* COMBINED BALANCE HERO CARD */}
+              <div className="combined-hero-card">
+                <div className="combined-balance-main">
+                  <span className="eyebrow" style={{ color: '#27704b' }}>TOTAL COMBINED HOUSEHOLD WEALTH</span>
+                  <strong>{money(summary?.combined_balance || 0)}</strong>
+                  <p className="muted" style={{ margin: 0, fontSize: 11 }}>
+                    Real-time combined balance across all {accounts.length} family accounts
+                  </p>
+                  <div className="combined-sub-pills">
+                    <span className="combined-pill">🏦 Banks: {money(accounts.filter(a => a.account_type === 'bank').reduce((s, a) => s + Number(a.current_balance), 0))}</span>
+                    <span className="combined-pill">💵 Cash: {money(accounts.filter(a => a.account_type === 'cash').reduce((s, a) => s + Number(a.current_balance), 0))}</span>
+                    <span className="combined-pill">👥 {members.length} Members</span>
+                    <span className="combined-pill">📋 {summary?.transaction_count || 0} Transactions</span>
+                  </div>
+                </div>
+                <div className="action-group">
+                  <button
+                    className="secondary"
+                    onClick={() => {
+                      setTransferAmount('');
+                      setTransferDesc('');
+                      setTransferDate(new Date().toISOString().slice(0, 16));
+                      setModal('transfer');
+                    }}
+                  >
+                    <ArrowLeftRight size={14} /> Transfer Funds
+                  </button>
+                  <button
+                    className="primary"
+                    onClick={() => {
+                      setEditingTx(null);
+                      setTxAmount('');
+                      setTxDescription('');
+                      setTxDate(new Date().toISOString().slice(0, 16));
+                      setModal('transaction');
+                    }}
+                  >
+                    <Plus size={15} /> Add Transaction
+                  </button>
+                </div>
+              </div>
+
+              {/* INDIVIDUAL MEMBER BALANCES SECTION */}
+              <section className="panel" style={{ marginTop: 20 }}>
+                <div className="panel-head">
+                  <div>
+                    <h2>👨‍👩‍👧 Family Member Balances (Individual Breakdown)</h2>
+                    <p className="muted">Combined family balance and individual balances per member account</p>
+                  </div>
+                  {userProfile?.role === 'admin' && (
+                    <button
+                      className="secondary"
+                      onClick={() => {
+                        setEditingMember(null);
+                        setMemberName('');
+                        setMemberRelation('Spouse');
+                        setMemberEmail('');
+                        setMemberRole('member');
+                        setMemberInitialPass('');
+                        setMemberCreateAcc(true);
+                        setMemberInitialAccName('');
+                        setMemberInitialAccType('bank');
+                        setMemberInitialAccBalance('0.00');
+                        setModal('member');
+                      }}
+                    >
+                      <Plus size={14} /> Add Member Account
+                    </button>
+                  )}
+                </div>
+                <div className="member-balances-grid">
+                  {summary?.member_balances && summary.member_balances.length > 0 ? (
+                    summary.member_balances.map((mb, idx) => (
+                      <div key={mb.member_id || `joint-${idx}`} className="member-card">
+                        <div className="member-card-top">
+                          <div className="member-card-avatar">
+                            {(mb.member_name || 'F').slice(0, 1).toUpperCase()}
+                          </div>
+                          <div className="member-card-meta">
+                            <b>{mb.member_name}</b>
+                            <small>{mb.relationship_label} {mb.email ? `· ${mb.email}` : ''}</small>
+                          </div>
+                          <span className={`role-badge ${mb.role === 'admin' ? 'admin' : 'member'}`}>
+                            {mb.role === 'admin' ? '👑 Admin' : '👤 Member'}
+                          </span>
+                        </div>
+
+                        <span style={{ fontSize: 10, color: '#88988d' }}>Individual Balance</span>
+                        <span className="member-balance-val">{money(mb.total_balance)}</span>
+
+                        <div className="member-account-list">
+                          <span style={{ fontSize: 9, fontWeight: 700, color: '#74877b', letterSpacing: '0.5px' }}>
+                            ACCOUNTS ({mb.account_count})
+                          </span>
+                          {mb.accounts && mb.accounts.length > 0 ? (
+                            mb.accounts.map(acc => (
+                              <div key={acc.id} className="member-account-item">
+                                <span>{acc.name} <small style={{ color: '#8c9c91' }}>({acc.account_type})</small></span>
+                                <b>{money(acc.current_balance)}</b>
+                              </div>
+                            ))
+                          ) : (
+                            <span style={{ fontSize: 10, color: '#9aaa9f', fontStyle: 'italic' }}>No linked accounts</span>
+                          )}
+                        </div>
+
+                        <div style={{ marginTop: 12, display: 'flex', gap: 8 }}>
+                          <button
+                            className={`secondary btn-sm ${filterMember === mb.member_id ? 'primary' : ''}`}
+                            style={{ width: '100%', fontSize: 10 }}
+                            onClick={() => {
+                              if (filterMember === mb.member_id) {
+                                setFilterMember('');
+                              } else if (mb.member_id) {
+                                setFilterMember(mb.member_id);
+                                setTab('Transactions');
+                              }
+                            }}
+                          >
+                            {filterMember === mb.member_id ? '✓ Showing Activity' : 'View Transactions →'}
+                          </button>
+                        </div>
+                      </div>
+                    ))
+                  ) : (
+                    <Empty text="No family member balances available yet." />
+                  )}
+                </div>
+              </section>
+
               <div className="period-row">
                 <span className="period-chip">
                   <Calendar size={14} />
@@ -1117,7 +1397,17 @@ export default function App() {
                   >
                     <ArrowLeftRight size={14} /> Transfer funds
                   </button>
-                  <button className="primary" onClick={() => { setAccName(''); setAccOpening('0.00'); setModal('account'); }}>
+                  <button
+                    className="primary"
+                    onClick={() => {
+                      setEditingAccount(null);
+                      setAccName('');
+                      setAccType('bank');
+                      setAccOpening('0.00');
+                      setAccOwnerMember('');
+                      setModal('account');
+                    }}
+                  >
                     <Plus size={15} /> Add account
                   </button>
                 </div>
@@ -1129,7 +1419,7 @@ export default function App() {
                     <div className="item-card-head">
                       <div>
                         <h3>{acc.name}</h3>
-                        <small>{acc.account_type.toUpperCase()}</small>
+                        <small>{acc.account_type.toUpperCase()} · <span className="member-pill">{acc.member_name || 'Joint / Family'}</span></small>
                       </div>
                       <span className="badge badge-green">Active</span>
                     </div>
@@ -1167,6 +1457,24 @@ export default function App() {
                           <ArrowLeftRight size={13} style={{ display: 'inline', marginRight: 4 }} /> Transfer
                         </button>
                       </div>
+                      {userProfile?.role === 'admin' && (
+                        <div style={{ marginTop: 8 }}>
+                          <button
+                            className="secondary btn-sm"
+                            style={{ width: '100%', fontSize: 10 }}
+                            onClick={() => {
+                              setEditingAccount(acc);
+                              setAccName(acc.name);
+                              setAccType(acc.account_type);
+                              setAccOpening(String(acc.opening_balance));
+                              setAccOwnerMember(acc.member_id || '');
+                              setModal('edit_account');
+                            }}
+                          >
+                            ✏️ Edit / Reassign Owner
+                          </button>
+                        </div>
+                      )}
                     </div>
                   </div>
                 ))}
@@ -1265,7 +1573,319 @@ export default function App() {
           )}
 
           {/* ========================================================= */}
-          {/* TAB 6: FAMILY MEMBERS                                     */}
+          {/* TAB 6: ADMIN CONSOLE (ZERO DATABASE TOUCHING NEEDED)      */}
+          {/* ========================================================= */}
+          {tab === '👑 Admin Console' && (
+            <div style={{ display: 'grid', gap: 20 }}>
+              {/* Section 1: Household Settings */}
+              <section className="panel">
+                <div className="panel-head">
+                  <div>
+                    <h2>👑 Household Workspace Settings</h2>
+                    <p className="muted">Configure family workspace details without database touching</p>
+                  </div>
+                  <span className="role-badge admin">👑 Full Admin Control</span>
+                </div>
+                <form
+                  className="form-stack"
+                  style={{ maxWidth: 460, marginTop: 15 }}
+                  onSubmit={async e => {
+                    e.preventDefault();
+                    setBusy(true);
+                    setError('');
+                    try {
+                      await api.updateHousehold({ name: householdEditName.trim(), currency: householdEditCurrency.trim() });
+                      notifySuccess('Household settings updated.');
+                      await refresh();
+                    } catch (err) {
+                      setError(err instanceof Error ? err.message : 'Failed to update household');
+                    } finally {
+                      setBusy(false);
+                    }
+                  }}
+                >
+                  <label>
+                    Family / Household Name
+                    <input
+                      required
+                      value={householdEditName}
+                      onChange={e => setHouseholdEditName(e.target.value)}
+                      placeholder="e.g. Rana Family"
+                    />
+                  </label>
+                  <label>
+                    Household Currency
+                    <input
+                      required
+                      maxLength={3}
+                      value={householdEditCurrency}
+                      onChange={e => setHouseholdEditCurrency(e.target.value.toUpperCase())}
+                      placeholder="INR"
+                    />
+                  </label>
+                  <button className="primary" style={{ justifySelf: 'start' }} disabled={busy}>
+                    {busy ? 'Saving…' : 'Save Household Settings'}
+                  </button>
+                </form>
+              </section>
+
+              {/* Section 2: Family Member & Sign-In Control Center */}
+              <section className="panel">
+                <div className="panel-head">
+                  <div>
+                    <h2>Family Members & Sign-In Control</h2>
+                    <p className="muted">Add members with login email, assign roles, and reset passwords directly</p>
+                  </div>
+                  <button
+                    className="primary"
+                    onClick={() => {
+                      setEditingMember(null);
+                      setMemberName('');
+                      setMemberRelation('Spouse');
+                      setMemberEmail('');
+                      setMemberRole('member');
+                      setMemberInitialPass('');
+                      setMemberCreateAcc(true);
+                      setMemberInitialAccName('');
+                      setMemberInitialAccType('bank');
+                      setMemberInitialAccBalance('0.00');
+                      setModal('member');
+                    }}
+                  >
+                    <Plus size={15} /> Add Member & Account
+                  </button>
+                </div>
+
+                <div style={{ overflowX: 'auto', marginTop: 15 }}>
+                  <table className="data-table">
+                    <thead>
+                      <tr>
+                        <th>Member</th>
+                        <th>Relationship</th>
+                        <th>Email (Login ID)</th>
+                        <th>Role</th>
+                        <th>Accounts</th>
+                        <th>Balance</th>
+                        <th>Admin Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {members.map(m => (
+                        <tr key={m.id}>
+                          <td>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
+                              <span className="avatar small">{(m.name || 'M').slice(0, 1).toUpperCase()}</span>
+                              <b>{m.name}</b>
+                            </div>
+                          </td>
+                          <td>{m.relationship_label}</td>
+                          <td>
+                            {m.email ? (
+                              <span style={{ color: '#276846', fontWeight: 600 }}>{m.email}</span>
+                            ) : (
+                              <span className="muted" style={{ fontStyle: 'italic' }}>No email assigned</span>
+                            )}
+                          </td>
+                          <td>
+                            <span className={`role-badge ${m.role === 'admin' ? 'admin' : 'member'}`}>
+                              {m.role === 'admin' ? '👑 Admin' : '👤 Member'}
+                            </span>
+                          </td>
+                          <td>{m.account_count} accounts</td>
+                          <td><b>{money(m.total_balance)}</b></td>
+                          <td>
+                            <div style={{ display: 'flex', gap: 6 }}>
+                              <button
+                                className="secondary btn-sm"
+                                title="Reset Login Password"
+                                onClick={() => {
+                                  setResetTargetMember(m);
+                                  setResetNewPass('');
+                                  setModal('reset_password');
+                                }}
+                              >
+                                🔑 Reset Pass
+                              </button>
+                              <button
+                                className="secondary btn-sm"
+                                onClick={() => {
+                                  setEditingMember(m);
+                                  setMemberName(m.name);
+                                  setMemberRelation(m.relationship_label);
+                                  setMemberEmail(m.email || '');
+                                  setMemberRole(m.role || 'member');
+                                  setModal('edit_member');
+                                }}
+                              >
+                                ✏️ Edit
+                              </button>
+                              {m.is_active && (
+                                <button
+                                  className="danger-ghost btn-sm"
+                                  onClick={async () => {
+                                    if (!window.confirm(`Deactivate ${m.name}? Historical transactions remain safe.`)) return;
+                                    await api.deleteMember(m.id);
+                                    notifySuccess(`${m.name} deactivated.`);
+                                    await refresh();
+                                  }}
+                                >
+                                  Deactivate
+                                </button>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+
+              {/* Section 3: Account Ownership & Balances */}
+              <section className="panel">
+                <div className="panel-head">
+                  <div>
+                    <h2>Account Ownership & Balances</h2>
+                    <p className="muted">Reassign accounts to family members or set as shared joint accounts</p>
+                  </div>
+                  <button
+                    className="primary"
+                    onClick={() => {
+                      setEditingAccount(null);
+                      setAccName('');
+                      setAccType('bank');
+                      setAccOpening('0.00');
+                      setAccOwnerMember('');
+                      setModal('account');
+                    }}
+                  >
+                    <Plus size={15} /> Add Account
+                  </button>
+                </div>
+
+                <div style={{ overflowX: 'auto', marginTop: 15 }}>
+                  <table className="data-table">
+                    <thead>
+                      <tr>
+                        <th>Account Name</th>
+                        <th>Type</th>
+                        <th>Assigned Owner</th>
+                        <th>Opening Balance</th>
+                        <th>Available Balance</th>
+                        <th>Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {accounts.map(acc => (
+                        <tr key={acc.id}>
+                          <td><b>{acc.name}</b></td>
+                          <td><span className="tag">{acc.account_type.toUpperCase()}</span></td>
+                          <td>
+                            <span className="member-pill">
+                              {acc.member_name || 'Joint / Family'}
+                            </span>
+                          </td>
+                          <td>{money(acc.opening_balance)}</td>
+                          <td><b style={{ color: '#207248' }}>{money(acc.current_balance)}</b></td>
+                          <td>
+                            <div style={{ display: 'flex', gap: 6 }}>
+                              <button
+                                className="secondary btn-sm"
+                                onClick={() => {
+                                  setEditingAccount(acc);
+                                  setAccName(acc.name);
+                                  setAccType(acc.account_type);
+                                  setAccOpening(String(acc.opening_balance));
+                                  setAccOwnerMember(acc.member_id || '');
+                                  setModal('edit_account');
+                                }}
+                              >
+                                ✏️ Edit / Reassign
+                              </button>
+                              <button
+                                className="danger-ghost btn-sm"
+                                onClick={async () => {
+                                  if (!window.confirm(`Deactivate account ${acc.name}?`)) return;
+                                  await api.deleteAccount(acc.id);
+                                  notifySuccess(`Account ${acc.name} deactivated.`);
+                                  await refresh();
+                                }}
+                              >
+                                <Trash2 size={13} />
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+
+              {/* Section 4: Live Household Audit Logs */}
+              <section className="panel">
+                <div className="panel-head">
+                  <div>
+                    <h2>Live Household Audit Trail</h2>
+                    <p className="muted">Verified logs of all administrative actions and fund operations</p>
+                  </div>
+                  <button
+                    className="secondary"
+                    onClick={async () => {
+                      setLoadingAuditLogs(true);
+                      try {
+                        const logs = await api.auditLogs(50);
+                        setAuditLogsList(logs);
+                        notifySuccess('Audit trail refreshed.');
+                      } catch (err) {
+                        setError('Failed to load audit logs');
+                      } finally {
+                        setLoadingAuditLogs(false);
+                      }
+                    }}
+                  >
+                    {loadingAuditLogs ? 'Refreshing…' : '🔄 Refresh Logs'}
+                  </button>
+                </div>
+
+                <div style={{ overflowX: 'auto', marginTop: 15 }}>
+                  {auditLogsList.length > 0 ? (
+                    <table className="data-table">
+                      <thead>
+                        <tr>
+                          <th>Date & Time</th>
+                          <th>Actor</th>
+                          <th>Action</th>
+                          <th>Entity</th>
+                          <th>Details</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {auditLogsList.map(log => (
+                          <tr key={log.id}>
+                            <td style={{ whiteSpace: 'nowrap', fontSize: 10, color: '#77887e' }}>
+                              {new Date(log.created_at).toLocaleString('en-IN')}
+                            </td>
+                            <td><b>{log.actor_name || 'System'}</b></td>
+                            <td><span className="tag">{log.action.toUpperCase()}</span></td>
+                            <td><small>{log.entity_type}</small></td>
+                            <td style={{ fontSize: 11 }}>{log.details || '—'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  ) : (
+                    <div style={{ textAlign: 'center', padding: '24px 0', color: '#88988e' }}>
+                      <p>Click "Refresh Logs" to view verified audit events for your household.</p>
+                    </div>
+                  )}
+                </div>
+              </section>
+            </div>
+          )}
+
+          {/* ========================================================= */}
+          {/* TAB 6B: FAMILY MEMBERS (STANDARD VIEW)                    */}
           {/* ========================================================= */}
           {tab === 'Family members' && (
             <section className="panel">
@@ -1274,17 +1894,24 @@ export default function App() {
                   <h2>Family members</h2>
                   <p className="muted">Bookkeeping profiles associated with your household.</p>
                 </div>
-                <button
-                  className="primary"
-                  onClick={() => {
-                    setEditingMember(null);
-                    setMemberName('');
-                    setMemberRelation('Spouse');
-                    setModal('member');
-                  }}
-                >
-                  <Plus size={16} /> Add member
-                </button>
+                {userProfile?.role === 'admin' && (
+                  <button
+                    className="primary"
+                    onClick={() => {
+                      setEditingMember(null);
+                      setMemberName('');
+                      setMemberRelation('Spouse');
+                      setMemberEmail('');
+                      setMemberRole('member');
+                      setMemberInitialPass('');
+                      setMemberCreateAcc(true);
+                      setMemberInitialAccName('');
+                      setModal('member');
+                    }}
+                  >
+                    <Plus size={16} /> Add member
+                  </button>
+                )}
               </div>
 
               <div className="member-list">
@@ -1292,35 +1919,43 @@ export default function App() {
                   <div className="member-row" key={m.id}>
                     <span className="avatar">{m.name.slice(0, 1).toUpperCase()}</span>
                     <div className="member-info">
-                      <b>{m.name}</b>
-                      <small>{m.relationship_label} · {m.is_active ? 'Active profile' : 'Inactive'}</small>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <b>{m.name}</b>
+                        <span className={`role-badge ${m.role === 'admin' ? 'admin' : 'member'}`}>
+                          {m.role === 'admin' ? '👑 Admin' : '👤 Member'}
+                        </span>
+                      </div>
+                      <small>
+                        {m.relationship_label} {m.email ? `· ${m.email}` : ''} · Balance: <b>{money(m.total_balance)}</b>
+                      </small>
                     </div>
-                    <div className="action-group">
-                      <button
-                        className="secondary"
-                        onClick={() => {
-                          setEditingMember(m);
-                          setMemberName(m.name);
-                          setMemberRelation(m.relationship_label);
-                          setModal('member');
-                        }}
-                      >
-                        Edit
-                      </button>
-                      {m.is_active && (
+                    {userProfile?.role === 'admin' && (
+                      <div className="action-group">
                         <button
-                          className="danger-ghost"
-                          onClick={async () => {
-                            if (!window.confirm(`Deactivate ${m.name}? Historical transactions remain safe.`)) return;
-                            await api.deleteMember(m.id);
-                            notifySuccess(`${m.name} deactivated.`);
-                            await refresh();
+                          className="secondary"
+                          onClick={() => {
+                            setEditingMember(m);
+                            setMemberName(m.name);
+                            setMemberRelation(m.relationship_label);
+                            setMemberEmail(m.email || '');
+                            setMemberRole(m.role || 'member');
+                            setModal('edit_member');
                           }}
                         >
-                          Deactivate
+                          Edit
                         </button>
-                      )}
-                    </div>
+                        <button
+                          className="secondary"
+                          onClick={() => {
+                            setResetTargetMember(m);
+                            setResetNewPass('');
+                            setModal('reset_password');
+                          }}
+                        >
+                          🔑 Password
+                        </button>
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>
@@ -1470,8 +2105,11 @@ export default function App() {
                 {modal === 'transaction' && 'Add Transaction'}
                 {modal === 'edit_transaction' && 'Edit Transaction'}
                 {modal === 'transfer' && 'Transfer Funds Between Accounts'}
-                {modal === 'member' && (editingMember ? 'Edit Family Member' : 'Add Family Member')}
+                {modal === 'member' && 'Add Family Member & Account'}
+                {modal === 'edit_member' && 'Edit Family Member'}
+                {modal === 'reset_password' && 'Reset Member Login Password'}
                 {modal === 'account' && 'Create Account'}
+                {modal === 'edit_account' && 'Edit & Reassign Account'}
                 {modal === 'budget' && 'Set Category Budget'}
                 {modal === 'goal' && 'Create Savings Goal'}
                 {modal === 'goal_contribute' && `Add Funds: ${selectedGoal?.name}`}
@@ -1778,17 +2416,24 @@ export default function App() {
               </form>
             )}
 
-            {/* Modal: Member */}
+            {/* Modal: Add Member & Account */}
             {modal === 'member' && (
               <form className="form-stack" onSubmit={async e => {
                 e.preventDefault();
                 setBusy(true);
                 setError('');
                 try {
-                  const p = { name: memberName.trim(), relationship_label: memberRelation };
-                  if (editingMember) await api.editMember(editingMember.id, p);
-                  else await api.addMember(p);
-                  notifySuccess('Member saved.');
+                  await api.addMember({
+                    name: memberName.trim(),
+                    relationship_label: memberRelation,
+                    email: memberEmail.trim() || undefined,
+                    role: memberRole,
+                    initial_password: memberInitialPass.trim() || undefined,
+                    initial_account_name: memberCreateAcc && memberInitialAccName.trim() ? memberInitialAccName.trim() : undefined,
+                    initial_account_type: memberInitialAccType,
+                    initial_account_balance: memberCreateAcc && memberInitialAccBalance ? memberInitialAccBalance : '0.00'
+                  });
+                  notifySuccess(`Family member ${memberName} added successfully.`);
                   setModal(null);
                   await refresh();
                 } catch (err) {
@@ -1798,8 +2443,8 @@ export default function App() {
                 }
               }}>
                 <label>
-                  Member name
-                  <input required minLength={2} value={memberName} onChange={e => setMemberName(e.target.value)} placeholder="e.g. Prabodh, Priya" />
+                  Member Name
+                  <input required minLength={2} value={memberName} onChange={e => setMemberName(e.target.value)} placeholder="e.g. Avimanyu, Sanjukta" />
                 </label>
                 <label>
                   Relationship
@@ -1807,20 +2452,191 @@ export default function App() {
                     {['Self', 'Spouse', 'Child', 'Parent', 'Sibling', 'Other'].map(x => <option key={x}>{x}</option>)}
                   </select>
                 </label>
+                <label>
+                  Email Address (for login)
+                  <input type="email" value={memberEmail} onChange={e => setMemberEmail(e.target.value)} placeholder="member@example.com (Required for member login)" />
+                  <small className="muted" style={{ fontSize: 9 }}>The member uses this email to sign in.</small>
+                </label>
+                <label>
+                  Role & Permissions
+                  <select value={memberRole} onChange={e => setMemberRole(e.target.value as 'admin' | 'member')}>
+                    <option value="member">👤 Family Member (Standard)</option>
+                    <option value="admin">👑 Family Admin (Full Access)</option>
+                  </select>
+                </label>
+                <label>
+                  Initial Password (Optional)
+                  <input
+                    type="password"
+                    minLength={6}
+                    value={memberInitialPass}
+                    onChange={e => setMemberInitialPass(e.target.value)}
+                    placeholder="Set temporary password for immediate sign in"
+                  />
+                  <small className="muted" style={{ fontSize: 9 }}>If provided, member can sign in right away with this password.</small>
+                </label>
+
+                <div style={{ borderTop: '1px solid #e7ede8', paddingTop: 10, marginTop: 4 }}>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+                    <input
+                      type="checkbox"
+                      checked={memberCreateAcc}
+                      onChange={e => {
+                        setMemberCreateAcc(e.target.checked);
+                        if (e.target.checked && !memberInitialAccName) {
+                          setMemberInitialAccName(`${memberName ? memberName + "'s " : ''}Bank Account`);
+                        }
+                      }}
+                      style={{ width: 'auto' }}
+                    />
+                    <span>Create an account for this member</span>
+                  </label>
+                </div>
+
+                {memberCreateAcc && (
+                  <div style={{ background: '#f8faf9', border: '1px solid #e5ede7', borderRadius: 8, padding: 12, display: 'grid', gap: 10 }}>
+                    <label>
+                      Account Name
+                      <input
+                        value={memberInitialAccName}
+                        onChange={e => setMemberInitialAccName(e.target.value)}
+                        placeholder="e.g. Avimanyu SBI Savings"
+                      />
+                    </label>
+                    <label>
+                      Account Type
+                      <select value={memberInitialAccType} onChange={e => setMemberInitialAccType(e.target.value)}>
+                        <option value="bank">Bank Account</option>
+                        <option value="cash">Cash in Hand</option>
+                        <option value="wallet">Digital Wallet / UPI</option>
+                        <option value="investment">Investment / Demat</option>
+                      </select>
+                    </label>
+                    <label>
+                      Opening Balance (₹)
+                      <input
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        value={memberInitialAccBalance}
+                        onChange={e => setMemberInitialAccBalance(e.target.value)}
+                        placeholder="0.00"
+                      />
+                    </label>
+                  </div>
+                )}
+
                 <button className="primary full" disabled={busy}>
-                  {busy ? 'Saving…' : 'Save family member'}
+                  {busy ? 'Saving…' : 'Save Family Member'}
                 </button>
               </form>
             )}
 
-            {/* Modal: Account */}
+            {/* Modal: Edit Member */}
+            {modal === 'edit_member' && editingMember && (
+              <form className="form-stack" onSubmit={async e => {
+                e.preventDefault();
+                setBusy(true);
+                setError('');
+                try {
+                  await api.updateMember(editingMember.id, {
+                    name: memberName.trim(),
+                    relationship_label: memberRelation,
+                    email: memberEmail.trim() || undefined,
+                    role: memberRole,
+                  });
+                  notifySuccess(`Member ${memberName} updated.`);
+                  setModal(null);
+                  await refresh();
+                } catch (err) {
+                  setError(err instanceof Error ? err.message : 'Failed to update member');
+                } finally {
+                  setBusy(false);
+                }
+              }}>
+                <label>
+                  Member Name
+                  <input required minLength={2} value={memberName} onChange={e => setMemberName(e.target.value)} />
+                </label>
+                <label>
+                  Relationship
+                  <select value={memberRelation} onChange={e => setMemberRelation(e.target.value)}>
+                    {['Self', 'Spouse', 'Child', 'Parent', 'Sibling', 'Other'].map(x => <option key={x}>{x}</option>)}
+                  </select>
+                </label>
+                <label>
+                  Email Address
+                  <input type="email" value={memberEmail} onChange={e => setMemberEmail(e.target.value)} placeholder="member@example.com" />
+                </label>
+                <label>
+                  Role
+                  <select value={memberRole} onChange={e => setMemberRole(e.target.value as 'admin' | 'member')}>
+                    <option value="member">👤 Family Member (Standard)</option>
+                    <option value="admin">👑 Family Admin (Full Access)</option>
+                  </select>
+                </label>
+                <button className="primary full" disabled={busy}>
+                  {busy ? 'Saving…' : 'Update Member Details'}
+                </button>
+              </form>
+            )}
+
+            {/* Modal: Reset Password */}
+            {modal === 'reset_password' && resetTargetMember && (
+              <form className="form-stack" onSubmit={async e => {
+                e.preventDefault();
+                setBusy(true);
+                setError('');
+                try {
+                  const res = await api.resetMemberPassword(resetTargetMember.id, resetNewPass.trim());
+                  notifySuccess(res.message);
+                  setModal(null);
+                  setResetNewPass('');
+                  await refresh();
+                } catch (err) {
+                  setError(err instanceof Error ? err.message : 'Failed to reset password');
+                } finally {
+                  setBusy(false);
+                }
+              }}>
+                <div style={{ background: '#f0f6f2', border: '1px solid #d4e7db', borderRadius: 8, padding: 12, fontSize: 11, color: '#255038' }}>
+                  🔑 Setting new password for <b>{resetTargetMember.name}</b> ({resetTargetMember.email || 'No email'}).
+                </div>
+                {!resetTargetMember.email && (
+                  <p className="error" style={{ margin: 0 }}>
+                    ⚠️ This member does not have an email assigned. Please edit the member and set their email first!
+                  </p>
+                )}
+                <label>
+                  New Password
+                  <input
+                    type="password"
+                    required
+                    minLength={6}
+                    value={resetNewPass}
+                    onChange={e => setResetNewPass(e.target.value)}
+                    placeholder="Enter at least 6 characters"
+                  />
+                </label>
+                <button className="primary full" disabled={busy || !resetTargetMember.email}>
+                  {busy ? 'Resetting…' : 'Reset Password Now'}
+                </button>
+              </form>
+            )}
+
+            {/* Modal: Create Account */}
             {modal === 'account' && (
               <form className="form-stack" onSubmit={async e => {
                 e.preventDefault();
                 setBusy(true);
                 setError('');
                 try {
-                  await api.addAccount({ name: accName.trim(), account_type: accType, opening_balance: accOpening || '0.00' });
+                  await api.addAccount({
+                    name: accName.trim(),
+                    account_type: accType,
+                    opening_balance: accOpening || '0.00',
+                    member_id: accOwnerMember || null
+                  });
                   notifySuccess('Account created.');
                   setModal(null);
                   await refresh();
@@ -1831,11 +2647,11 @@ export default function App() {
                 }
               }}>
                 <label>
-                  Account name
+                  Account Name
                   <input required minLength={2} value={accName} onChange={e => setAccName(e.target.value)} placeholder="e.g. SBI Savings, HDFC, Cash" />
                 </label>
                 <label>
-                  Account type
+                  Account Type
                   <select value={accType} onChange={e => setAccType(e.target.value)}>
                     <option value="bank">Bank Account</option>
                     <option value="cash">Cash in Hand</option>
@@ -1845,11 +2661,79 @@ export default function App() {
                   </select>
                 </label>
                 <label>
-                  Opening balance (₹)
+                  Account Owner (Family Member)
+                  <select value={accOwnerMember} onChange={e => setAccOwnerMember(e.target.value)}>
+                    <option value="">Joint / Shared Family Account</option>
+                    {members.map(m => (
+                      <option key={m.id} value={m.id}>
+                        {m.name} ({m.relationship_label})
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  Opening Balance (₹)
                   <input type="number" step="0.01" min="0" value={accOpening} onChange={e => setAccOpening(e.target.value)} placeholder="0.00" />
                 </label>
                 <button className="primary full" disabled={busy}>
-                  {busy ? 'Saving…' : 'Create account'}
+                  {busy ? 'Saving…' : 'Create Account'}
+                </button>
+              </form>
+            )}
+
+            {/* Modal: Edit & Reassign Account */}
+            {modal === 'edit_account' && editingAccount && (
+              <form className="form-stack" onSubmit={async e => {
+                e.preventDefault();
+                setBusy(true);
+                setError('');
+                try {
+                  await api.updateAccount(editingAccount.id, {
+                    name: accName.trim(),
+                    account_type: accType,
+                    opening_balance: accOpening || '0.00',
+                    member_id: accOwnerMember || null
+                  });
+                  notifySuccess('Account updated.');
+                  setModal(null);
+                  await refresh();
+                } catch (err) {
+                  setError(err instanceof Error ? err.message : 'Failed to update account');
+                } finally {
+                  setBusy(false);
+                }
+              }}>
+                <label>
+                  Account Name
+                  <input required minLength={2} value={accName} onChange={e => setAccName(e.target.value)} />
+                </label>
+                <label>
+                  Account Type
+                  <select value={accType} onChange={e => setAccType(e.target.value)}>
+                    <option value="bank">Bank Account</option>
+                    <option value="cash">Cash in Hand</option>
+                    <option value="credit_card">Credit Card</option>
+                    <option value="wallet">Digital Wallet / UPI</option>
+                    <option value="investment">Investment / Demat</option>
+                  </select>
+                </label>
+                <label>
+                  Account Owner (Reassign to Member)
+                  <select value={accOwnerMember} onChange={e => setAccOwnerMember(e.target.value)}>
+                    <option value="">Joint / Shared Family Account</option>
+                    {members.map(m => (
+                      <option key={m.id} value={m.id}>
+                        {m.name} ({m.relationship_label})
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  Opening Balance (₹)
+                  <input type="number" step="0.01" min="0" value={accOpening} onChange={e => setAccOpening(e.target.value)} />
+                </label>
+                <button className="primary full" disabled={busy}>
+                  {busy ? 'Saving…' : 'Save Account Changes'}
                 </button>
               </form>
             )}
@@ -1964,6 +2848,55 @@ export default function App() {
           </section>
         </div>
       )}
+
+      {/* Mobile Bottom Navigation Bar */}
+      <nav className="mobile-bottom-bar">
+        <button
+          className={`mobile-tab-btn ${tab === 'Overview' ? 'active' : ''}`}
+          onClick={() => { setTab('Overview'); window.scrollTo({ top: 0, behavior: 'smooth' }); }}
+        >
+          <LayoutDashboard size={18} />
+          <span>Overview</span>
+        </button>
+        <button
+          className={`mobile-tab-btn ${tab === 'Accounts & Transfers' ? 'active' : ''}`}
+          onClick={() => { setTab('Accounts & Transfers'); window.scrollTo({ top: 0, behavior: 'smooth' }); }}
+        >
+          <CreditCard size={18} />
+          <span>Accounts</span>
+        </button>
+        <button
+          className={`mobile-tab-btn ${tab === 'Transactions' ? 'active' : ''}`}
+          onClick={() => { setTab('Transactions'); window.scrollTo({ top: 0, behavior: 'smooth' }); }}
+        >
+          <ReceiptText size={18} />
+          <span>Activity</span>
+        </button>
+        <button
+          className={`mobile-tab-btn ${tab === 'Bank Statement' ? 'active' : ''}`}
+          onClick={() => { setTab('Bank Statement'); window.scrollTo({ top: 0, behavior: 'smooth' }); }}
+        >
+          <BookOpen size={18} />
+          <span>Statement</span>
+        </button>
+        {userProfile?.role === 'admin' ? (
+          <button
+            className={`mobile-tab-btn ${tab === '👑 Admin Console' ? 'active' : ''}`}
+            onClick={() => { setTab('👑 Admin Console'); window.scrollTo({ top: 0, behavior: 'smooth' }); }}
+          >
+            <ShieldCheck size={18} />
+            <span>Admin</span>
+          </button>
+        ) : (
+          <button
+            className={`mobile-tab-btn ${tab === 'Family members' ? 'active' : ''}`}
+            onClick={() => { setTab('Family members'); window.scrollTo({ top: 0, behavior: 'smooth' }); }}
+          >
+            <Users size={18} />
+            <span>Family</span>
+          </button>
+        )}
+      </nav>
     </div>
   );
 }

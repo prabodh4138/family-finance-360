@@ -21,9 +21,12 @@ class User(Base):
     email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
     full_name: Mapped[str] = mapped_column(String(120))
     password_hash: Mapped[str] = mapped_column(String(255))
+    role: Mapped[str] = mapped_column(String(20), default="member") # "admin" or "member"
+    household_id: Mapped[str | None] = mapped_column(ForeignKey("households.id", ondelete="CASCADE"), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    household: Mapped["Household"] = relationship(back_populates="owner", uselist=False)
+    
+    household: Mapped["Household | None"] = relationship(foreign_keys=[household_id])
 
 class Household(Base):
     __tablename__ = "households"
@@ -32,7 +35,7 @@ class Household(Base):
     name: Mapped[str] = mapped_column(String(120), default="My Family")
     currency: Mapped[str] = mapped_column(String(3), default="INR")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    owner: Mapped[User] = relationship(back_populates="household")
+    owner: Mapped[User] = relationship(foreign_keys=[owner_id])
     members: Mapped[list["FamilyMember"]] = relationship(back_populates="household", cascade="all, delete-orphan")
     accounts: Mapped[list["Account"]] = relationship(back_populates="household", cascade="all, delete-orphan")
 
@@ -40,21 +43,30 @@ class FamilyMember(Base):
     __tablename__ = "family_members"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     household_id: Mapped[str] = mapped_column(ForeignKey("households.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     name: Mapped[str] = mapped_column(String(120))
+    email: Mapped[str | None] = mapped_column(String(320), nullable=True, index=True)
+    role: Mapped[str] = mapped_column(String(20), default="member") # "admin" or "member"
     relationship_label: Mapped[str] = mapped_column(String(60), default="Other")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    
     household: Mapped[Household] = relationship(back_populates="members")
+    user: Mapped[User | None] = relationship(foreign_keys=[user_id])
+    accounts: Mapped[list["Account"]] = relationship(back_populates="member", foreign_keys="Account.member_id")
 
 class Account(Base):
     __tablename__ = "accounts"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     household_id: Mapped[str] = mapped_column(ForeignKey("households.id", ondelete="CASCADE"), index=True)
+    member_id: Mapped[str | None] = mapped_column(ForeignKey("family_members.id", ondelete="SET NULL"), nullable=True)
     name: Mapped[str] = mapped_column(String(100))
     account_type: Mapped[str] = mapped_column(String(30), default="cash") # cash, bank, credit_card, wallet, investment
     opening_balance: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=Decimal("0.00"))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    
     household: Mapped[Household] = relationship(back_populates="accounts")
+    member: Mapped[FamilyMember | None] = relationship(back_populates="accounts", foreign_keys=[member_id])
 
 class Category(Base):
     __tablename__ = "categories"

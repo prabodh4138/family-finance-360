@@ -163,3 +163,113 @@ def test_production_modifications_lifecycle():
     assert stmt_csv.status_code == 200
     assert "text/csv" in stmt_csv.headers["content-type"]
     assert "Available Balance" in stmt_csv.text
+
+def test_family_member_accounts_auth_and_admin_controls():
+    uid = uuid.uuid4().hex[:8]
+    admin_email = f"admin_{uid}@example.com"
+    admin_pass = "AdminPass123!"
+
+    # 1. Register Admin
+    reg = client.post("/api/v1/auth/register", json={
+        "email": admin_email,
+        "full_name": "Prabodh Admin",
+        "password": admin_pass,
+        "household_name": "Rana Family"
+    })
+    assert reg.status_code == 201
+    admin_token = reg.json()["access_token"]
+    admin_headers = {"Authorization": f"Bearer {admin_token}"}
+
+    # Verify admin role
+    me_resp = client.get("/api/v1/auth/me", headers=admin_headers)
+    assert me_resp.status_code == 200
+    me_data = me_resp.json()
+    assert me_data["role"] == "admin"
+    assert me_data["household_name"] == "Rana Family"
+
+    # 2. Admin adds family member Avimanyu with email, password, and initial account
+    avi_email = f"avimanyu_{uid}@example.com"
+    avi_pass = "AviInitialPass123!"
+    add_member_resp = client.post("/api/v1/members", headers=admin_headers, json={
+        "name": "Avimanyu",
+        "relationship_label": "Son",
+        "email": avi_email,
+        "role": "member",
+        "initial_password": avi_pass,
+        "initial_account_name": "Avimanyu SBI Savings",
+        "initial_account_type": "bank",
+        "initial_account_balance": "25000.00"
+    })
+    assert add_member_resp.status_code == 201
+    avi_member = add_member_resp.json()
+    assert avi_member["email"] == avi_email
+    assert avi_member["role"] == "member"
+    assert avi_member["account_count"] == 1
+    assert Decimal(str(avi_member["total_balance"])) == Decimal("25000.00")
+
+    # 3. Avimanyu signs in directly using his email and initial password!
+    login_resp = client.post("/api/v1/auth/login", json={
+        "email": avi_email,
+        "password": avi_pass
+    })
+    assert login_resp.status_code == 200
+    avi_token = login_resp.json()["access_token"]
+    avi_headers = {"Authorization": f"Bearer {avi_token}"}
+
+    # Avimanyu can access the family household data
+    avi_me = client.get("/api/v1/auth/me", headers=avi_headers).json()
+    assert avi_me["role"] == "member"
+    assert avi_me["household_id"] == me_data["household_id"]
+
+    # Member cannot do admin actions (like resetting other member passwords)
+    forbidden_resp = client.post(f"/api/v1/members/{avi_member['id']}/reset-password", headers=avi_headers, json={
+        "new_password": "HackerPassword!"
+    })
+    assert forbidden_resp.status_code == 403
+
+    # 4. Admin resets Avimanyu's password without touching DB
+    new_avi_pass = "AviNewSecretPass789!"
+    reset_resp = client.post(f"/api/v1/members/{avi_member['id']}/reset-password", headers=admin_headers, json={
+        "new_password": new_avi_pass
+    })
+    assert reset_resp.status_code == 200
+
+    # Old password no longer works
+    fail_login = client.post("/api/v1/auth/login", json={
+        "email": avi_email,
+        "password": avi_pass
+    })
+    assert fail_login.status_code == 401
+
+    # New password works perfectly
+    new_login = client.post("/api/v1/auth/login", json={
+        "email": avi_email,
+        "password": new_avi_pass
+    })
+    assert new_login.status_code == 200
+
+    # 5. Combined Balance & Individual Balance in Dashboard
+    summary_resp = client.get("/api/v1/dashboard/summary", headers=admin_headers)
+    assert summary_resp.status_code == 200
+    summary = summary_resp.json()
+
+    # Avimanyu has 25,000, Cash and Primary Bank have 0.00 -> Combined Balance is at least 25,000.00
+    assert Decimal(str(summary["combined_balance"])) >= Decimal("25000.00")
+    assert len(summary["member_balances"]) >= 2 # Prabodh + Avimanyu
+
+    avi_bal = next(m for m in summary["member_balances"] if m["member_id"] == avi_member["id"])
+    assert Decimal(str(avi_bal["total_balance"])) == Decimal("25000.00")
+    assert avi_bal["accounts"][0]["name"] == "Avimanyu SBI Savings"
+    assert Decimal(str(avi_bal["accounts"][0]["current_balance"])) == Decimal("25000.00")
+
+    # 6. Admin Household update & Audit Logs
+    up_h = client.put("/api/v1/admin/household", headers=admin_headers, json={
+        "name": "Rana Royal Family",
+        "currency": "INR"
+    })
+    assert up_h.status_code == 200
+    assert up_h.json()["name"] == "Rana Royal Family"
+
+    audit_logs = client.get("/api/v1/admin/audit-logs", headers=admin_headers)
+    assert audit_logs.status_code == 200
+    assert len(audit_logs.json()) >= 2

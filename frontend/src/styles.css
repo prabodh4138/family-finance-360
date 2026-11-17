@@ -37,3 +37,64 @@
 .btn-icon.danger:hover{background:#faebee;color:#b84f5c}
 .category-pill{font-size:9px;background:#f3f6f3;padding:3px 7px;border-radius:5px;color:#5a6e62}
 .member-pill{font-size:9px;background:#edf3fc;padding:3px 7px;border-radius:5px;color:#3b5697}
+
+/* ========================================================= */
+/* INTERACTIVE WISH NOTIFICATION & GREETING HERO            */
+/* ========================================================= */
+.greeting-hero{background:linear-gradient(135deg,#133024 0%,#1c4534 60%,#275a44 100%);color:#f2f7f4;border-radius:16px;padding:22px 26px;margin-bottom:24px;box-shadow:0 10px 25px rgba(22,50,38,0.12);position:relative;overflow:hidden}
+.greeting-hero::after{content:'';position:absolute;top:-40px;right:-40px;width:160px;height:160px;background:radial-gradient(circle,rgba(86,182,138,0.2) 0%,transparent 70%);border-radius:50%;pointer-events:none}
+.greeting-top{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:12px}
+.greeting-time-badge{display:inline-flex;align-items:center;gap:6px;background:rgba(255,255,255,0.12);padding:5px 11px;border-radius:20px;font-size:10px;font-weight:600;letter-spacing:0.4px;color:#c9e4d5}
+.greeting-title{font:800 24px Manrope;margin:4px 0 0;letter-spacing:-0.5px;color:#ffffff}
+.greeting-sub{font-size:12px;color:#a9cbb8;margin-top:4px}
+.greeting-interactive-box{background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);border-radius:10px;padding:10px 14px;margin-top:14px;display:flex;align-items:center;justify-content:space-between;gap:12px;cursor:pointer;transition:all .18s ease}
+.greeting-interactive-box:hover{background:rgba(255,255,255,0.12);border-color:rgba(255,255,255,0.2)}
+.greeting-quote-text{font-size:11px;color:#e1f0e7;line-height:1.4}
+.greeting-quote-hint{font-size:9px;color:#8cc4a4;font-weight:600;white-space:nowrap}
+.greeting-actions{display:flex;gap:10px;margin-top:16px;flex-wrap:wrap}
+.greeting-btn{background:rgba(255,255,255,0.16);color:#fff;border:1px solid rgba(255,255,255,0.25);border-radius:8px;padding:7px 13px;font-size:11px;font-weight:600;display:inline-flex;align-items:center;gap:6px;transition:all .15s ease}
+.greeting-btn:hover{background:rgba(255,255,255,0.25);transform:translateY(-1px)}
+.greeting-btn.primary-light{background:#358d62;border-color:#358d62}
+.greeting-btn.primary-light:hover{background:#2a7550}
+
+/* ========================================================= */
+/* COMBINED BALANCE & INDIVIDUAL MEMBER BALANCES             */
+/* ========================================================= */
+.combined-hero-card{background:#ffffff;border:1px solid #e3eae4;border-radius:15px;padding:24px;margin-bottom:20px;box-shadow:0 4px 15px rgba(0,0,0,0.03);display:flex;justify-content:space-between;align-items:center;gap:20px;flex-wrap:wrap}
+.combined-balance-main strong{display:block;font:800 32px Manrope;color:#183627;letter-spacing:-1px;margin:6px 0 2px}
+.combined-sub-pills{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
+.combined-pill{font-size:10px;padding:5px 9px;border-radius:6px;background:#f0f5f1;color:#496153;font-weight:600}
+.member-balances-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px;margin:16px 0 24px}
+.member-card{background:#ffffff;border:1px solid #e7ede8;border-radius:14px;padding:18px;transition:all .18s ease;position:relative}
+.member-card:hover{border-color:#2a7550;box-shadow:0 8px 24px rgba(42,117,80,0.08);transform:translateY(-2px)}
+.member-card-top{display:flex;align-items:center;gap:12px;margin-bottom:12px}
+.member-card-avatar{width:42px;height:42px;border-radius:12px;background:#e5efe8;color:#245c40;display:grid;place-items:center;font-weight:800;font-size:15px}
+.member-card-meta{flex:1}
+.member-card-meta b{font:700 13px Manrope;color:#1e3729;display:block}
+.member-card-meta small{font-size:10px;color:#87968c;display:block;margin-top:2px}
+.member-balance-val{font:800 20px Manrope;color:#196a43;margin:8px 0 12px;display:block}
+.member-account-list{border-top:1px dashed #e8eee9;padding-top:10px;margin-top:10px;display:grid;gap:6px}
+.member-account-item{display:flex;justify-content:space-between;font-size:10px;color:#4e6456;background:#f8faf8;padding:5px 8px;border-radius:6px}
+.member-account-item b{color:#1c3728}
+.role-badge{font-size:9px;font-weight:700;padding:3px 8px;border-radius:12px;letter-spacing:0.4px;display:inline-flex;align-items:center;gap:4px}
+.role-badge.admin{background:#fdf2d8;color:#8f6208;border:1px solid #fae1a0}
+.role-badge.member{background:#e7f2ed;color:#226e47;border:1px solid #c7e3d3}
+
+/* ========================================================= */
+/* MOBILE BOTTOM NAVIGATION BAR                              */
+/* ========================================================= */
+.mobile-bottom-bar{display:none}
+@media(max-width:768px){
+  .mobile-bottom-bar{display:flex;position:fixed;bottom:0;left:0;right:0;height:64px;background:#ffffff;border-top:1px solid #e7ede8;box-shadow:0 -4px 16px rgba(0,0,0,0.05);z-index:45;justify-content:space-around;align-items:center;padding:0 4px}
+  .mobile-tab-btn{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;border:0;background:transparent;color:#788b80;font-size:9px;font-weight:600;padding:6px 8px;border-radius:8px;flex:1;transition:all .15s ease}
+  .mobile-tab-btn svg{width:18px;height:18px}
+  .mobile-tab-btn.active{color:#236b49}
+  .mobile-tab-btn.active svg{stroke-width:2.5;color:#236b49}
+  .main-area{margin-bottom:70px}
+  .content{padding-bottom:80px}
+  .greeting-title{font-size:20px}
+  .greeting-hero{padding:18px 16px}
+  .combined-hero-card{padding:18px}
+  .combined-balance-main strong{font-size:26px}
+}
+

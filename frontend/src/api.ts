@@ -22,11 +22,29 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+export interface UserMe {
+  id: string;
+  email: string;
+  full_name: string;
+  role: 'admin' | 'member';
+  household_id: string;
+  household_name: string;
+  currency: string;
+  member_id?: string | null;
+  member_name?: string | null;
+}
+
 export interface Member {
   id: string;
   name: string;
   relationship_label: string;
+  email?: string | null;
+  role: 'admin' | 'member';
+  user_id?: string | null;
+  can_login: boolean;
   is_active: boolean;
+  account_count: number;
+  total_balance: string | number;
 }
 
 export interface Account {
@@ -35,7 +53,20 @@ export interface Account {
   account_type: string;
   opening_balance: string | number;
   current_balance: string | number;
+  member_id?: string | null;
+  member_name?: string | null;
   is_active: boolean;
+}
+
+export interface MemberBalance {
+  member_id?: string | null;
+  member_name: string;
+  relationship_label: string;
+  role: string;
+  email?: string | null;
+  total_balance: string | number;
+  account_count: number;
+  accounts: Account[];
 }
 
 export interface Category {
@@ -90,12 +121,25 @@ export interface MonthlyTrend {
 }
 
 export interface Summary {
+  combined_balance: string | number;
+  member_balances: MemberBalance[];
   total_income: string | number;
   total_expenses: string | number;
   net_savings: string | number;
   transaction_count: number;
   category_breakdown: CategoryBreakdown[];
   monthly_trend: MonthlyTrend[];
+}
+
+export interface AuditLog {
+  id: string;
+  actor_user_id: string;
+  actor_name?: string | null;
+  entity_type: string;
+  entity_id: string;
+  action: string;
+  details?: string | null;
+  created_at: string;
 }
 
 export interface Budget {
@@ -176,9 +220,9 @@ export const api = {
   // Auth
   login: (email: string, password: string) =>
     request<{ access_token: string }>('/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) }),
-  register: (payload: { email: string; full_name: string; password: string; household_name: string }) =>
+  register: (payload: { email: string; full_name: string; password: string; household_name?: string }) =>
     request<{ access_token: string }>('/auth/register', { method: 'POST', body: JSON.stringify(payload) }),
-  me: () => request<{ id: string; email: string; full_name: string; household_name: string; currency: string }>('/auth/me'),
+  me: () => request<UserMe>('/auth/me'),
 
   // Categories
   categories: () => request<Category[]>('/categories'),
@@ -187,16 +231,44 @@ export const api = {
 
   // Members
   members: () => request<Member[]>('/members'),
-  addMember: (payload: { name: string; relationship_label: string }) =>
-    request<Member>('/members', { method: 'POST', body: JSON.stringify(payload) }),
+  addMember: (payload: {
+    name: string;
+    relationship_label: string;
+    email?: string;
+    role?: string;
+    initial_password?: string;
+    initial_account_name?: string;
+    initial_account_type?: string;
+    initial_account_balance?: string | number;
+  }) => request<Member>('/members', { method: 'POST', body: JSON.stringify(payload) }),
+  updateMember: (id: string, payload: {
+    name?: string;
+    relationship_label?: string;
+    email?: string;
+    role?: string;
+    is_active?: boolean;
+  }) => request<Member>(`/members/${id}`, { method: 'PUT', body: JSON.stringify(payload) }),
   editMember: (id: string, payload: { name: string; relationship_label: string }) =>
-    request<Member>(`/members/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
+    request<Member>(`/members/${id}`, { method: 'PUT', body: JSON.stringify(payload) }),
+  resetMemberPassword: (memberId: string, new_password: string) =>
+    request<{ message: string }>(`/members/${memberId}/reset-password`, {
+      method: 'POST',
+      body: JSON.stringify({ new_password }),
+    }),
   deleteMember: (id: string) => request<void>(`/members/${id}`, { method: 'DELETE' }),
 
   // Accounts & Transfers
   accounts: () => request<Account[]>('/accounts'),
-  addAccount: (payload: { name: string; account_type: string; opening_balance: string | number }) =>
+  addAccount: (payload: { name: string; account_type: string; opening_balance: string | number; member_id?: string | null }) =>
     request<Account>('/accounts', { method: 'POST', body: JSON.stringify(payload) }),
+  updateAccount: (id: string, payload: {
+    name?: string;
+    account_type?: string;
+    opening_balance?: string | number;
+    member_id?: string | null;
+    is_active?: boolean;
+  }) => request<Account>(`/accounts/${id}`, { method: 'PUT', body: JSON.stringify(payload) }),
+  deleteAccount: (id: string) => request<void>(`/accounts/${id}`, { method: 'DELETE' }),
   transferFunds: (payload: TransferPayload) =>
     request<{ message: string; from_account_balance: string | number; to_account_balance: string | number }>('/accounts/transfer', {
       method: 'POST',
@@ -206,6 +278,14 @@ export const api = {
     request<AccountStatement>(`/accounts/${accountId}/statement?from_date=${fromDate}&to_date=${toDate}`),
   exportStatementCsvUrl: (accountId: string, fromDate: string, toDate: string) =>
     `${API_BASE}/accounts/${accountId}/statement/export/csv?from_date=${fromDate}&to_date=${toDate}`,
+
+  // Admin Controls
+  updateHousehold: (payload: { name?: string; currency?: string }) =>
+    request<{ message: string; name: string; currency: string }>('/admin/household', {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }),
+  auditLogs: (limit = 50) => request<AuditLog[]>(`/admin/audit-logs?limit=${limit}`),
 
   // Transactions
   transactions: (params: { type?: string; member_id?: string; category_id?: string; account_id?: string; month?: string; search?: string } = {}) => {
