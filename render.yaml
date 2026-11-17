@@ -33,17 +33,14 @@ services:
         value: http://localhost:5173,https://family-finance-360-frontend.onrender.com
 
   # -------------------------------------------------------------
-  # 2. Frontend Static Site (React + Vite PWA)
+  # 2. Frontend Static Site (React + Vite PWA) - Global CDN
   # -------------------------------------------------------------
   - type: web
     runtime: static
     name: family-finance-360-frontend
-    plan: free
-    region: oregon
     rootDir: frontend
     buildCommand: npm install && npm run build
     staticPublishPath: ./dist
-    autoDeploy: true
     routes:
       - type: rewrite
         source: /*
